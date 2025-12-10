@@ -1,52 +1,64 @@
 // app/widget/script/route.ts
+import type { NextRequest } from "next/server";
 
-export async function GET() {
-  const js = `"use strict";
-(function () {
-  async function fetchConvergoFeed() {
-    try {
-      var el = document.getElementById("convergo-feed");
-      if (!el) return;
+const WIDGET_JS = `(() => {
+  function init() {
+    // Avoid duplicating the button if script loads twice
+    if (document.getElementById("convergo-widget-button")) return;
 
-      const res = await fetch("/api/feed");
-      const data = await res.json();
+    const btn = document.createElement("button");
+    btn.id = "convergo-widget-button";
+    btn.innerText = "ConVergo Live";
 
-      el.innerHTML = data.data
-        .map(function (cu) {
-          var who = cu.speaker === "H" ? "Human" : "AI";
-          return (
-            '<div style="padding:8px 0;border-bottom:1px solid #222;color:#eee;font-family:system-ui, -apple-system, BlinkMacSystemFont, sans-serif;">' +
-              '<div style="font-size:11px;opacity:0.7;margin-bottom:2px;">' +
-                who +
-                " · #" +
-                cu.meta.sequence +
-              "</div>" +
-              '<div style="font-size:13px;line-height:1.4;">' +
-                cu.text +
-              "</div>" +
-            "</div>"
-          );
-        })
-        .join("");
+    Object.assign(btn.style, {
+      position: "fixed",
+      bottom: "1.5rem",
+      right: "1.5rem",
+      zIndex: "999999",
+      borderRadius: "9999px",
+      padding: "0.75rem 1.25rem",
+      border: "none",
+      cursor: "pointer",
+      fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      fontSize: "14px",
+      fontWeight: "600",
+      color: "#0f172a",
+      background: "linear-gradient(135deg, #2dd4bf, #22c55e)",
+      boxShadow: "0 10px 25px rgba(15, 23, 42, 0.35)",
+    });
 
-      var badge = document.getElementById("convergo-badge");
-      if (badge) {
-        badge.innerHTML =
-          'Powered by <strong>ConVergo™</strong> &amp; ChatGPT';
-      }
-    } catch (e) {
-      console.error("ConVergo widget error", e);
-    }
+    btn.addEventListener("mouseenter", () => {
+      btn.style.transform = "translateY(-1px)";
+      btn.style.boxShadow = "0 14px 30px rgba(15, 23, 42, 0.45)";
+    });
+
+    btn.addEventListener("mouseleave", () => {
+      btn.style.transform = "translateY(0)";
+      btn.style.boxShadow = "0 10px 25px rgba(15, 23, 42, 0.35)";
+    });
+
+    btn.addEventListener("click", () => {
+      // For now just log; later we’ll open the full widget panel
+      console.log("[ConVergo] Widget button clicked on", window.location.href);
+      alert("ConVergo widget is wired in and live. Next step: open the full panel here.");
+    });
+
+    document.body.appendChild(btn);
   }
 
-  // initial load + refresh every 5s
-  fetchConvergoFeed();
-  setInterval(fetchConvergoFeed, 5000);
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
 })();`;
 
-  return new Response(js, {
+export async function GET(_req: NextRequest) {
+  return new Response(WIDGET_JS, {
+    status: 200,
     headers: {
       "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "public, max-age=0, s-maxage=300",
     },
   });
 }
