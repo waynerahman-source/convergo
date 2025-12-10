@@ -5,7 +5,8 @@ import { addMessage, ConversationUnit } from "../../../lib/convergoStore";
 type CaptureBody = {
   speaker: "H" | "A";
   text: string;
-  category?: string[];
+  // 👇 Match the type used in ConversationUnit so TS is happy
+  category?: ConversationUnit["category"];
   tags?: ConversationUnit["tags"];
 };
 
