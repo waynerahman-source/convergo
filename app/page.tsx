@@ -26,7 +26,7 @@ type FeedResponse = {
 };
 
 export default async function Home() {
-  const res = await fetch("http://localhost:3000/api/feed", {
+  const res = await fetch("/api/feed", {
     cache: "no-store",
   });
 
