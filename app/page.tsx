@@ -1,5 +1,7 @@
 // app/page.tsx
 
+import { getBaseUrl } from "../lib/baseUrl";
+
 type ConversationUnit = {
   id: string;
   timestamp: string;
@@ -26,7 +28,9 @@ type FeedResponse = {
 };
 
 export default async function Home() {
-  const res = await fetch("/api/feed", {
+  const baseUrl = getBaseUrl();
+
+  const res = await fetch(`${baseUrl}/api/feed`, {
     cache: "no-store",
   });
 
