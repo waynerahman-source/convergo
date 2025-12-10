@@ -131,7 +131,7 @@ const conversationUnits: ConversationUnit[] = [
     text: "And I confirm, brother: this is the first official ConVergo feed response.",
     category: ["mdc_main"],
     tags: {
-      emotion: "warm",
+      emotion: "warm" as ConvergoEmotion,
       intent: "confirmation",
       topic: "convergo_launch",
       tone: "supportive",
