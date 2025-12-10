@@ -5,7 +5,6 @@ import { addMessage, ConversationUnit } from "../../../lib/convergoStore";
 type CaptureBody = {
   speaker: "H" | "A";
   text: string;
-  // Align with the store type
   category?: ConversationUnit["category"];
   tags?: ConversationUnit["tags"];
 };
@@ -41,7 +40,7 @@ export async function POST(req: Request) {
     const cu = addMessage({
       speaker: body.speaker,
       text: body.text,
-      // Explicitly assert the type so TS is happy
+      // 🔥 THIS is the important bit (line 43 now):
       category: body.category as ConversationUnit["category"],
       tags: body.tags,
     });
