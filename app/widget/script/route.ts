@@ -6,6 +6,11 @@ const WIDGET_JS = `(() => {
   if (window.__convergoWidgetLoaded) return;
   window.__convergoWidgetLoaded = true;
 
+  // ✅ IMPORTANT: If running inside an iframe, do nothing.
+  // This prevents "modal inside modal" recursion when /embed loads the widget too.
+  const inIframe = window.self !== window.top;
+  if (inIframe) return;
+
   const scriptEl =
     document.currentScript || [...document.scripts].slice(-1)[0];
 
@@ -130,6 +135,9 @@ const WIDGET_JS = `(() => {
 
   function openModal() {
     ensureUI();
+    // ✅ Safety: if already open, do nothing
+    if (el(MODAL_ID) && !el(MODAL_ID).hidden) return;
+
     el(BACKDROP_ID).hidden = false;
     el(MODAL_ID).hidden = false;
     el(BTN_ID).style.display = "none";
@@ -150,7 +158,6 @@ export async function GET() {
   return new NextResponse(WIDGET_JS, {
     headers: {
       "Content-Type": "application/javascript; charset=utf-8",
-      // Important during iteration; later we can add proper caching with versioning
       "Cache-Control": "no-store",
     },
   });
