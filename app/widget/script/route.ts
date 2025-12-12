@@ -95,7 +95,7 @@ const WIDGET_JS = `(() => {
     if (!el(BACKDROP_ID)) {
       const bd = document.createElement("div");
       bd.id = BACKDROP_ID;
-      bd.hidden = true;
+      bd.style.display = "none";
       bd.addEventListener("click", closeModal);
       document.body.appendChild(bd);
     }
@@ -104,7 +104,7 @@ const WIDGET_JS = `(() => {
     if (!el(MODAL_ID)) {
       const modal = document.createElement("div");
       modal.id = MODAL_ID;
-      modal.hidden = true;
+      modal.style.display = "none";
 
       const close = document.createElement("button");
       close.id = CLOSE_ID;
@@ -134,20 +134,30 @@ const WIDGET_JS = `(() => {
   }
 
   function openModal() {
-    ensureUI();
-    // ✅ Safety: if already open, do nothing
-    if (el(MODAL_ID) && !el(MODAL_ID).hidden) return;
+  ensureUI();
 
-    el(BACKDROP_ID).hidden = false;
-    el(MODAL_ID).hidden = false;
-    el(BTN_ID).style.display = "none";
-  }
+  const modal = el(MODAL_ID);
+  const bd = el(BACKDROP_ID);
+  const btn = el(BTN_ID);
 
-  function closeModal() {
-    if (el(BACKDROP_ID)) el(BACKDROP_ID).hidden = true;
-    if (el(MODAL_ID)) el(MODAL_ID).hidden = true;
-    if (el(BTN_ID)) el(BTN_ID).style.display = "";
-  }
+  // already open?
+  if (modal && modal.style.display !== "none") return;
+
+  if (bd) bd.style.display = "block";
+  if (modal) modal.style.display = "flex";
+  if (btn) btn.style.display = "none";
+}
+
+function closeModal() {
+  const modal = el(MODAL_ID);
+  const bd = el(BACKDROP_ID);
+  const btn = el(BTN_ID);
+
+  if (bd) bd.style.display = "none";
+  if (modal) modal.style.display = "none";
+  if (btn) btn.style.display = "";
+}
+
 
   // Boot
   ensureUI();
