@@ -21,6 +21,12 @@ const WIDGET_JS = `(() => {
   const theme =
     ((scriptEl && scriptEl.getAttribute("data-theme")) || "burgundy").toLowerCase();
 
+  // Author + Learn More (configurable, with ConVergo-safe defaults)
+  const author =
+    (scriptEl && scriptEl.getAttribute("data-author")) || "the author";
+  const learnMore =
+    (scriptEl && scriptEl.getAttribute("data-learn-more")) || "https://convergo.live";
+
   // Auto-open is SAFE-BY-DEFAULT (OFF).
   // It will ONLY auto-open if BOTH are set:
   //   data-auto-open="true" AND data-auto-open-mode="force"
@@ -105,7 +111,7 @@ const WIDGET_JS = `(() => {
 
       #\${BACKDROP_ID}{
         position:fixed; inset:0; z-index:2147483646;
-        background:rgba(15, 23, 42, .35); /* elegant slate tint */
+        background:rgba(15, 23, 42, .35);
       }
 
       #\${MODAL_ID}{
@@ -157,7 +163,7 @@ const WIDGET_JS = `(() => {
       const btn = document.createElement("button");
       btn.id = BTN_ID;
       btn.type = "button";
-      btn.textContent = label; // "See live" default
+      btn.textContent = label;
       btn.setAttribute(ACTION_ATTR, ACTION_OPEN);
       document.body.appendChild(btn);
     }
@@ -190,7 +196,13 @@ const WIDGET_JS = `(() => {
       const iframe = document.createElement("iframe");
       iframe.id = IFRAME_ID;
       iframe.loading = "lazy";
-      iframe.src = \`\${convergoOrigin}/embed?site=\${encodeURIComponent(site)}\`;
+
+      // ✅ Pass author + learnMore into /embed as query params
+      const embedUrl = new URL(\`\${convergoOrigin}/embed\`);
+      embedUrl.searchParams.set("site", site);
+      embedUrl.searchParams.set("author", author);
+      embedUrl.searchParams.set("learnMore", learnMore);
+      iframe.src = embedUrl.toString();
 
       const footer = document.createElement("div");
       footer.id = FOOTER_ID;
@@ -267,7 +279,6 @@ const WIDGET_JS = `(() => {
   // Auto-open is OFF unless explicitly forced
   if (autoOpen) openModal();
 })();`;
-
 
 export async function GET() {
   return new NextResponse(WIDGET_JS, {
