@@ -15,7 +15,13 @@ const WIDGET_JS = `(() => {
 
   const site = (scriptEl && scriptEl.getAttribute("data-site")) || "default";
 
-  // Auto-open is now SAFE-BY-DEFAULT (OFF).
+  // Button label + theme (configurable)
+  const label =
+    (scriptEl && scriptEl.getAttribute("data-label")) || "See live";
+  const theme =
+    ((scriptEl && scriptEl.getAttribute("data-theme")) || "burgundy").toLowerCase();
+
+  // Auto-open is SAFE-BY-DEFAULT (OFF).
   // It will ONLY auto-open if BOTH are set:
   //   data-auto-open="true" AND data-auto-open-mode="force"
   const autoOpenAttr =
@@ -60,16 +66,40 @@ const WIDGET_JS = `(() => {
     document.body.style.overflow = prevBodyOverflow;
   }
 
+  function getThemeVars() {
+    // You can add themes later without touching layout logic
+    if (theme === "burgundy") {
+      return {
+        bg: "#6b0f2e",       // burgundy
+        fg: "#ffffff",       // white text
+      };
+    }
+    if (theme === "mint") {
+      return {
+        bg: "#1bbf82",
+        fg: "#0b2b1f",
+      };
+    }
+    // default fallback
+    return {
+      bg: "#6b0f2e",
+      fg: "#ffffff",
+    };
+  }
+
   function ensureStyles() {
     if (el(STYLE_ID)) return;
+    const { bg, fg } = getThemeVars();
+
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = \`
       #\${BTN_ID}{
         position:fixed; right:24px; bottom:24px; z-index:2147483647;
         padding:14px 20px; border-radius:999px; border:0;
-        background:#1bbf82; color:#0b2b1f; font-weight:600;
-        box-shadow:0 10px 30px rgba(0,0,0,.2);
+        background:\${bg}; color:\${fg}; font-weight:700;
+        letter-spacing:.2px;
+        box-shadow:0 10px 30px rgba(0,0,0,.22);
         cursor:pointer;
       }
       #\${BACKDROP_ID}{
@@ -114,7 +144,7 @@ const WIDGET_JS = `(() => {
       const btn = document.createElement("button");
       btn.id = BTN_ID;
       btn.type = "button";
-      btn.textContent = "ConVergo Live";
+      btn.textContent = label; // ✅ "See live" default
       btn.setAttribute(ACTION_ATTR, ACTION_OPEN);
       document.body.appendChild(btn);
     }
@@ -166,7 +196,6 @@ const WIDGET_JS = `(() => {
     if (listenersBound) return;
     listenersBound = true;
 
-    // Click delegation (survives re-injection and avoids multiple handlers)
     document.addEventListener("click", (e) => {
       const target =
         e.target && e.target.closest
@@ -179,7 +208,6 @@ const WIDGET_JS = `(() => {
       if (action === ACTION_CLOSE) closeModal();
     });
 
-    // ESC closes when open
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape" && isOpen) closeModal();
     });
@@ -223,7 +251,7 @@ const WIDGET_JS = `(() => {
   // Boot
   ensureUI();
 
-  // Auto-open is OFF unless explicitly forced (see autoOpen definition above)
+  // Auto-open is OFF unless explicitly forced
   if (autoOpen) openModal();
 })();`;
 
