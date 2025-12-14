@@ -14,12 +14,23 @@ const WIDGET_JS = `(() => {
     document.currentScript || [...document.scripts].slice(-1)[0];
 
   const site = (scriptEl && scriptEl.getAttribute("data-site")) || "default";
-  const autoOpenAttr = (scriptEl && scriptEl.getAttribute("data-auto-open")) || "";
-  const autoOpen = autoOpenAttr === "true" || autoOpenAttr === "1";
+
+  // Auto-open is now SAFE-BY-DEFAULT (OFF).
+  // It will ONLY auto-open if BOTH are set:
+  //   data-auto-open="true" AND data-auto-open-mode="force"
+  const autoOpenAttr =
+    (scriptEl && scriptEl.getAttribute("data-auto-open")) || "";
+  const autoOpenMode =
+    (scriptEl && scriptEl.getAttribute("data-auto-open-mode")) || "";
+  const autoOpen =
+    (autoOpenAttr === "true" || autoOpenAttr === "1") &&
+    autoOpenMode === "force";
 
   // Derive Convergo origin from script src (works on preview/prod)
   const scriptSrc = (scriptEl && scriptEl.src) || "";
-  const convergoOrigin = scriptSrc ? new URL(scriptSrc).origin : "https://convergo.live";
+  const convergoOrigin = scriptSrc
+    ? new URL(scriptSrc).origin
+    : "https://convergo.live";
 
   const BTN_ID = "convergo-widget-button";
   const BACKDROP_ID = "convergo-backdrop";
@@ -157,7 +168,10 @@ const WIDGET_JS = `(() => {
 
     // Click delegation (survives re-injection and avoids multiple handlers)
     document.addEventListener("click", (e) => {
-      const target = e.target && e.target.closest ? e.target.closest(\`[\${ACTION_ATTR}]\`) : null;
+      const target =
+        e.target && e.target.closest
+          ? e.target.closest(\`[\${ACTION_ATTR}]\`)
+          : null;
       if (!target) return;
 
       const action = target.getAttribute(ACTION_ATTR);
@@ -179,7 +193,6 @@ const WIDGET_JS = `(() => {
     const btn = el(BTN_ID);
 
     if (!modal || !bd || !btn) return;
-
     if (isOpen) return;
 
     bd.style.display = "block";
@@ -209,6 +222,8 @@ const WIDGET_JS = `(() => {
 
   // Boot
   ensureUI();
+
+  // Auto-open is OFF unless explicitly forced (see autoOpen definition above)
   if (autoOpen) openModal();
 })();`;
 
