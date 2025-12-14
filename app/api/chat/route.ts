@@ -10,9 +10,20 @@ type Incoming = {
   message?: string;
 };
 
+// Prisma may surface enums as string at build time depending on config.
+// So we accept string here and normalize.
+type HistoryRow = {
+  role: string;
+  content: string;
+};
+
 function getErrMsg(err: unknown) {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+function toChatRole(role: string): "user" | "assistant" {
+  return role === "assistant" ? "assistant" : "user";
 }
 
 export async function POST(req: Request) {
@@ -59,23 +70,25 @@ export async function POST(req: Request) {
       return NextResponse.json({ reply });
     }
 
-    // Build context from the last 30 messages
-    const history = await prisma.message.findMany({
+    // Build context from the last 30 messages (only role + content)
+    const history: HistoryRow[] = await prisma.message.findMany({
       where: { conversationId: convo.id },
       orderBy: { createdAt: "asc" },
       take: 30,
+      select: { role: true, content: true },
     });
 
     const messages = [
       {
-        role: "system",
+        role: "system" as const,
         content:
           "You are an AI diary companion. Be warm, concise, and helpful. Keep responses short unless asked for detail.",
       },
-      ...history.map((m) => ({
-        role: m.role === "assistant" ? "assistant" : "user",
+      ...history.map((m: HistoryRow) => ({
+        role: toChatRole(m.role),
         content: m.content,
       })),
+      { role: "user" as const, content: userText },
     ];
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -105,9 +118,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ reply });
     }
 
-    const data = (await r.json()) as any;
+    const data = (await r.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+
     const reply =
-      (data?.choices?.[0]?.message?.content as string | undefined)?.trim() ??
+      data?.choices?.[0]?.message?.content?.trim() ??
       "Sorry — no reply returned.";
 
     // Save assistant reply
