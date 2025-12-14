@@ -70,8 +70,8 @@ const WIDGET_JS = `(() => {
     // You can add themes later without touching layout logic
     if (theme === "burgundy") {
       return {
-        bg: "#6b0f2e",       // burgundy
-        fg: "#ffffff",       // white text
+        bg: "#6b0f2e", // burgundy
+        fg: "#ffffff", // white text
       };
     }
     if (theme === "mint") {
@@ -102,35 +102,48 @@ const WIDGET_JS = `(() => {
         box-shadow:0 10px 30px rgba(0,0,0,.22);
         cursor:pointer;
       }
+
       #\${BACKDROP_ID}{
         position:fixed; inset:0; z-index:2147483646;
-        background:rgba(0,0,0,.45);
+        background:rgba(15, 23, 42, .35); /* elegant slate tint */
       }
+
       #\${MODAL_ID}{
         position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
         width:min(900px, calc(100vw - 32px));
         height:min(650px, calc(100vh - 32px));
         z-index:2147483647;
-        background:#0b0f14; border-radius:16px;
-        box-shadow:0 20px 60px rgba(0,0,0,.45);
+
+        background:#ffffff;
+        color:#0f172a;
+        border-radius:18px;
+        border:1px solid rgba(15, 23, 42, .10);
+        box-shadow:0 22px 70px rgba(0,0,0,.28);
+
         overflow:hidden;
         display:flex; flex-direction:column;
       }
+
       #\${CLOSE_ID}{
         position:absolute; right:14px; top:10px;
         width:40px; height:40px; border-radius:999px;
-        border:0; background:rgba(255,255,255,.08);
-        color:white; font-size:22px; cursor:pointer; z-index:2;
+        border:1px solid rgba(15, 23, 42, .12);
+        background:rgba(15, 23, 42, .04);
+        color:#0f172a; font-size:22px; cursor:pointer; z-index:2;
       }
+
       #\${IFRAME_ID}{
         width:100%; height:100%; border:0; flex:1;
+        background:#ffffff;
       }
+
       #\${FOOTER_ID}{
         padding:10px 14px;
         font:12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
-        color:rgba(255,255,255,.65);
-        border-top:1px solid rgba(255,255,255,.08);
+        color:rgba(15, 23, 42, .65);
+        border-top:1px solid rgba(15, 23, 42, .10);
         text-align:center;
+        background:#ffffff;
       }
     \`;
     document.head.appendChild(style);
@@ -144,7 +157,7 @@ const WIDGET_JS = `(() => {
       const btn = document.createElement("button");
       btn.id = BTN_ID;
       btn.type = "button";
-      btn.textContent = label; // ✅ "See live" default
+      btn.textContent = label; // "See live" default
       btn.setAttribute(ACTION_ATTR, ACTION_OPEN);
       document.body.appendChild(btn);
     }
@@ -254,6 +267,7 @@ const WIDGET_JS = `(() => {
   // Auto-open is OFF unless explicitly forced
   if (autoOpen) openModal();
 })();`;
+
 
 export async function GET() {
   return new NextResponse(WIDGET_JS, {
