@@ -6,11 +6,11 @@ const WIDGET_JS = `(() => {
   if (window.__convergoWidgetLoaded) return;
   window.__convergoWidgetLoaded = true;
 
-  // If running inside an iframe, do nothing (prevents recursion when /embed loads widget)
+  // If running inside an iframe, do nothing
   const inIframe = window.self !== window.top;
   if (inIframe) return;
 
-  // ✅ Robust script element detection (WP can break document.currentScript)
+  // Robust script detection (WordPress-safe)
   const scriptEl =
     document.currentScript ||
     Array.from(document.scripts).find((s) => {
@@ -20,30 +20,25 @@ const WIDGET_JS = `(() => {
     Array.from(document.scripts).slice(-1)[0];
 
   const getAttr = (name, fallback = "") => {
-    const v = scriptEl && scriptEl.getAttribute ? scriptEl.getAttribute(name) : null;
+    const v = scriptEl && scriptEl.getAttribute
+      ? scriptEl.getAttribute(name)
+      : null;
     return (v ?? fallback).trim();
   };
 
   const site = getAttr("data-site", "default");
-
-  // Button label + theme (configurable)
   const label = getAttr("data-label", "See live");
   const theme = getAttr("data-theme", "burgundy").toLowerCase();
-
-  // Author + Learn More (configurable, with ConVergo-safe defaults)
   const author = getAttr("data-author", "the author");
   const learnMore = getAttr("data-learn-more", "https://convergo.live");
 
-  // Auto-open is SAFE-BY-DEFAULT (OFF).
-  // It will ONLY auto-open if BOTH are set:
-  //   data-auto-open="true" AND data-auto-open-mode="force"
-  const autoOpenAttr = getAttr("data-auto-open", "");
-  const autoOpenMode = getAttr("data-auto-open-mode", "");
+  // Auto-open (force only)
   const autoOpen =
-    (autoOpenAttr === "true" || autoOpenAttr === "1") &&
-    autoOpenMode === "force";
+    (getAttr("data-auto-open") === "true" ||
+      getAttr("data-auto-open") === "1") &&
+    getAttr("data-auto-open-mode") === "force";
 
-  // Derive Convergo origin from script src (works on preview/prod)
+  // Determine Convergo origin
   const scriptSrc = (scriptEl && scriptEl.src) || "";
   const convergoOrigin = scriptSrc
     ? new URL(scriptSrc).origin
@@ -57,7 +52,6 @@ const WIDGET_JS = `(() => {
   const FOOTER_ID = "convergo-footer";
   const STYLE_ID = "convergo-styles";
 
-  // Action attributes for robust event delegation
   const ACTION_ATTR = "data-cvg-action";
   const ACTION_OPEN = "open";
   const ACTION_CLOSE = "close";
@@ -78,7 +72,6 @@ const WIDGET_JS = `(() => {
   }
 
   function getThemeVars() {
-    // You can add themes later without touching layout logic
     if (theme === "burgundy") {
       return { bg: "#6b0f2e", fg: "#ffffff" };
     }
@@ -99,52 +92,39 @@ const WIDGET_JS = `(() => {
         position:fixed; right:24px; bottom:24px; z-index:2147483647;
         padding:14px 20px; border-radius:999px; border:0;
         background:\${bg}; color:\${fg}; font-weight:700;
-        letter-spacing:.2px;
         box-shadow:0 10px 30px rgba(0,0,0,.22);
         cursor:pointer;
       }
-
       #\${BACKDROP_ID}{
         position:fixed; inset:0; z-index:2147483646;
-        background:rgba(15, 23, 42, .35);
+        background:rgba(15,23,42,.35);
       }
-
       #\${MODAL_ID}{
-        position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+        position:fixed; left:50%; top:50%;
+        transform:translate(-50%,-50%);
         width:min(900px, calc(100vw - 32px));
         height:min(650px, calc(100vh - 32px));
-        z-index:2147483647;
-
-        background:#ffffff;
-        color:#0f172a;
+        background:#fff; color:#0f172a;
         border-radius:18px;
-        border:1px solid rgba(15, 23, 42, .10);
+        border:1px solid rgba(15,23,42,.1);
         box-shadow:0 22px 70px rgba(0,0,0,.28);
-
-        overflow:hidden;
-        display:flex; flex-direction:column;
+        display:none; flex-direction:column;
+        z-index:2147483647;
       }
-
       #\${CLOSE_ID}{
         position:absolute; right:14px; top:10px;
         width:40px; height:40px; border-radius:999px;
-        border:1px solid rgba(15, 23, 42, .12);
-        background:rgba(15, 23, 42, .04);
-        color:#0f172a; font-size:22px; cursor:pointer; z-index:2;
+        background:rgba(15,23,42,.04);
+        border:1px solid rgba(15,23,42,.12);
+        font-size:22px; cursor:pointer;
       }
-
       #\${IFRAME_ID}{
-        width:100%; height:100%; border:0; flex:1;
-        background:#ffffff;
+        width:100%; height:100%; border:0; background:#fff;
       }
-
       #\${FOOTER_ID}{
-        padding:10px 14px;
-        font:12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, Arial;
-        color:rgba(15, 23, 42, .65);
-        border-top:1px solid rgba(15, 23, 42, .10);
-        text-align:center;
-        background:#ffffff;
+        padding:10px; font-size:12px;
+        border-top:1px solid rgba(15,23,42,.1);
+        text-align:center; color:rgba(15,23,42,.65);
       }
     \`;
     document.head.appendChild(style);
@@ -153,17 +133,14 @@ const WIDGET_JS = `(() => {
   function ensureUI() {
     ensureStyles();
 
-    // Button
     if (!el(BTN_ID)) {
       const btn = document.createElement("button");
       btn.id = BTN_ID;
-      btn.type = "button";
       btn.textContent = label;
       btn.setAttribute(ACTION_ATTR, ACTION_OPEN);
       document.body.appendChild(btn);
     }
 
-    // Backdrop
     if (!el(BACKDROP_ID)) {
       const bd = document.createElement("div");
       bd.id = BACKDROP_ID;
@@ -172,60 +149,53 @@ const WIDGET_JS = `(() => {
       document.body.appendChild(bd);
     }
 
-    // Modal
     if (!el(MODAL_ID)) {
       const modal = document.createElement("div");
       modal.id = MODAL_ID;
-      modal.style.display = "none";
-      modal.setAttribute("role", "dialog");
-      modal.setAttribute("aria-modal", "true");
-      modal.setAttribute("aria-hidden", "true");
 
       const close = document.createElement("button");
       close.id = CLOSE_ID;
-      close.type = "button";
-      close.setAttribute("aria-label", "Close ConVergo panel");
-      close.setAttribute(ACTION_ATTR, ACTION_CLOSE);
       close.innerHTML = "&times;";
+      close.setAttribute(ACTION_ATTR, ACTION_CLOSE);
 
       const iframe = document.createElement("iframe");
       iframe.id = IFRAME_ID;
       iframe.loading = "lazy";
 
-      // ✅ Pass author + learnMore into /embed as query params
+      // ✅ Embed URL with cache-busting
       const embedUrl = new URL(\`\${convergoOrigin}/embed\`);
       embedUrl.searchParams.set("site", site);
       embedUrl.searchParams.set("author", author);
       embedUrl.searchParams.set("learnMore", learnMore);
+
+      try {
+        const v = scriptSrc ? new URL(scriptSrc).searchParams.get("v") : null;
+        embedUrl.searchParams.set("v", v || String(Date.now()));
+      } catch {
+        embedUrl.searchParams.set("v", String(Date.now()));
+      }
+
       iframe.src = embedUrl.toString();
 
       const footer = document.createElement("div");
       footer.id = FOOTER_ID;
       footer.textContent = "Powered by ConVergo & ChatGPT";
 
-      modal.appendChild(close);
-      modal.appendChild(iframe);
-      modal.appendChild(footer);
+      modal.append(close, iframe, footer);
       document.body.appendChild(modal);
     }
 
-    bindGlobalListenersOnce();
+    bindListeners();
   }
 
-  function bindGlobalListenersOnce() {
+  function bindListeners() {
     if (listenersBound) return;
     listenersBound = true;
 
     document.addEventListener("click", (e) => {
-      const target =
-        e.target && e.target.closest
-          ? e.target.closest(\`[\${ACTION_ATTR}]\`)
-          : null;
-      if (!target) return;
-
-      const action = target.getAttribute(ACTION_ATTR);
-      if (action === ACTION_OPEN) openModal();
-      if (action === ACTION_CLOSE) closeModal();
+      const t = e.target?.closest?.(\`[\${ACTION_ATTR}]\`);
+      if (!t) return;
+      t.getAttribute(ACTION_ATTR) === ACTION_OPEN ? openModal() : closeModal();
     });
 
     document.addEventListener("keydown", (e) => {
@@ -234,44 +204,30 @@ const WIDGET_JS = `(() => {
   }
 
   function openModal() {
-    ensureUI();
-
-    const modal = el(MODAL_ID);
-    const bd = el(BACKDROP_ID);
+    const m = el(MODAL_ID);
+    const b = el(BACKDROP_ID);
     const btn = el(BTN_ID);
-
-    if (!modal || !bd || !btn) return;
-    if (isOpen) return;
-
-    bd.style.display = "block";
-    modal.style.display = "flex";
-    modal.setAttribute("aria-hidden", "false");
+    if (!m || isOpen) return;
+    b.style.display = "block";
+    m.style.display = "flex";
     btn.style.display = "none";
-
     lockScroll();
     isOpen = true;
   }
 
   function closeModal() {
-    const modal = el(MODAL_ID);
-    const bd = el(BACKDROP_ID);
+    const m = el(MODAL_ID);
+    const b = el(BACKDROP_ID);
     const btn = el(BTN_ID);
-
-    if (bd) bd.style.display = "none";
-    if (modal) {
-      modal.style.display = "none";
-      modal.setAttribute("aria-hidden", "true");
-    }
-    if (btn) btn.style.display = "";
-
-    if (isOpen) unlockScroll();
+    if (!m) return;
+    b.style.display = "none";
+    m.style.display = "none";
+    btn.style.display = "";
+    unlockScroll();
     isOpen = false;
   }
 
-  // Boot
   ensureUI();
-
-  // Auto-open is OFF unless explicitly forced
   if (autoOpen) openModal();
 })();`;
 
