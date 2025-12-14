@@ -6,37 +6,48 @@ export default function EmbedDemo() {
     <main
       style={{
         minHeight: "100vh",
-        background: "#020617",
-        color: "#e5e7eb",
+        background: "#ffffff",
+        color: "#0f172a",
         fontFamily: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif",
         padding: "2rem 1.5rem",
       }}
     >
       <h1 style={{ fontSize: "1.5rem", marginBottom: "0.5rem" }}>
-        ConVergo™ Widget Demo
+        You’re viewing an ongoing conversation
       </h1>
-      <p style={{ fontSize: "0.9rem", opacity: 0.8, marginBottom: "1.5rem" }}>
-        This page uses the embeddable script at <code>/widget/script</code> to
-        render the live feed into a plain <code>&lt;div&gt;</code>.
+
+      <p
+        style={{
+          fontSize: "0.95rem",
+          color: "rgba(15, 23, 42, 0.75)",
+          marginBottom: "1.25rem",
+          maxWidth: "46rem",
+          lineHeight: 1.5,
+        }}
+      >
+        between the author of this site and his AI diary companion. This is a
+        live window into a real dialogue — not a chatbot demo, not fiction, and
+        not an advert.
       </p>
 
       <div
         id="convergo-feed"
         style={{
-          borderRadius: "0.75rem",
-          border: "1px solid #1f2937",
+          borderRadius: "0.9rem",
+          border: "1px solid rgba(15, 23, 42, 0.12)",
           padding: "1rem",
-          background: "#020617",
-          maxWidth: "40rem",
+          background: "rgba(248, 250, 252, 0.9)",
+          maxWidth: "46rem",
+          boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
         }}
       ></div>
 
       <div
         id="convergo-badge"
         style={{
-          marginTop: "0.75rem",
-          fontSize: "0.75rem",
-          opacity: 0.8,
+          marginTop: "0.85rem",
+          fontSize: "0.8rem",
+          color: "rgba(15, 23, 42, 0.65)",
         }}
       ></div>
 
