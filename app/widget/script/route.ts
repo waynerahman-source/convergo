@@ -10,30 +10,35 @@ const WIDGET_JS = `(() => {
   const inIframe = window.self !== window.top;
   if (inIframe) return;
 
+  // ✅ Robust script element detection (WP can break document.currentScript)
   const scriptEl =
-    document.currentScript || [...document.scripts].slice(-1)[0];
+    document.currentScript ||
+    Array.from(document.scripts).find((s) => {
+      const src = s.getAttribute("src") || "";
+      return src.includes("/widget/script");
+    }) ||
+    Array.from(document.scripts).slice(-1)[0];
 
-  const site = (scriptEl && scriptEl.getAttribute("data-site")) || "default";
+  const getAttr = (name, fallback = "") => {
+    const v = scriptEl && scriptEl.getAttribute ? scriptEl.getAttribute(name) : null;
+    return (v ?? fallback).trim();
+  };
+
+  const site = getAttr("data-site", "default");
 
   // Button label + theme (configurable)
-  const label =
-    (scriptEl && scriptEl.getAttribute("data-label")) || "See live";
-  const theme =
-    ((scriptEl && scriptEl.getAttribute("data-theme")) || "burgundy").toLowerCase();
+  const label = getAttr("data-label", "See live");
+  const theme = getAttr("data-theme", "burgundy").toLowerCase();
 
   // Author + Learn More (configurable, with ConVergo-safe defaults)
-  const author =
-    (scriptEl && scriptEl.getAttribute("data-author")) || "the author";
-  const learnMore =
-    (scriptEl && scriptEl.getAttribute("data-learn-more")) || "https://convergo.live";
+  const author = getAttr("data-author", "the author");
+  const learnMore = getAttr("data-learn-more", "https://convergo.live");
 
   // Auto-open is SAFE-BY-DEFAULT (OFF).
   // It will ONLY auto-open if BOTH are set:
   //   data-auto-open="true" AND data-auto-open-mode="force"
-  const autoOpenAttr =
-    (scriptEl && scriptEl.getAttribute("data-auto-open")) || "";
-  const autoOpenMode =
-    (scriptEl && scriptEl.getAttribute("data-auto-open-mode")) || "";
+  const autoOpenAttr = getAttr("data-auto-open", "");
+  const autoOpenMode = getAttr("data-auto-open-mode", "");
   const autoOpen =
     (autoOpenAttr === "true" || autoOpenAttr === "1") &&
     autoOpenMode === "force";
@@ -75,22 +80,12 @@ const WIDGET_JS = `(() => {
   function getThemeVars() {
     // You can add themes later without touching layout logic
     if (theme === "burgundy") {
-      return {
-        bg: "#6b0f2e", // burgundy
-        fg: "#ffffff", // white text
-      };
+      return { bg: "#6b0f2e", fg: "#ffffff" };
     }
     if (theme === "mint") {
-      return {
-        bg: "#1bbf82",
-        fg: "#0b2b1f",
-      };
+      return { bg: "#1bbf82", fg: "#0b2b1f" };
     }
-    // default fallback
-    return {
-      bg: "#6b0f2e",
-      fg: "#ffffff",
-    };
+    return { bg: "#6b0f2e", fg: "#ffffff" };
   }
 
   function ensureStyles() {
