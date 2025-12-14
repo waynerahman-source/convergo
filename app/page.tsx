@@ -1,6 +1,7 @@
 // app/page.tsx
 
-import { getBaseUrl } from "../lib/baseUrl";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type ConversationUnit = {
   id: string;
@@ -28,31 +29,23 @@ type FeedResponse = {
 };
 
 export default async function Home() {
-  const baseUrl = getBaseUrl();
-
   let feed: FeedResponse | null = null;
 
   try {
-    const res = await fetch(`${baseUrl}/api/feed`, {
+    // Use a relative URL so builds and deployments don't depend on localhost/baseUrl
+    const res = await fetch("/api/feed", {
       cache: "no-store",
     });
 
     if (!res.ok) {
-      console.error(
-        "Failed to load feed:",
-        res.status,
-        res.statusText
-      );
+      console.error("Failed to load feed:", res.status, res.statusText);
     } else {
       const contentType = res.headers.get("content-type") ?? "";
 
       if (contentType.includes("application/json")) {
         feed = (await res.json()) as FeedResponse;
       } else {
-        console.error(
-          "Unexpected content-type for feed:",
-          contentType
-        );
+        console.error("Unexpected content-type for feed:", contentType);
       }
     }
   } catch (err) {
@@ -64,21 +57,19 @@ export default async function Home() {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 flex flex-col items-center justify-center px-4 py-10">
         <h1 className="text-3xl md:text-4xl font-semibold mb-4">
-          ConVergo<span className="text-teal-400">™</span>
+          ConVergo<span className="text-teal-400">⟐</span>
         </h1>
         <p className="text-slate-300 mb-4 text-center max-w-xl">
           The Human–AI Conversation Engine.
         </p>
         <p className="text-slate-400 text-sm text-center max-w-md">
-          The live demo feed is temporarily unavailable. Please try again
-          in a moment.
+          The live demo feed is temporarily unavailable. Please try again in a
+          moment.
         </p>
         <div className="mt-8 text-xs text-slate-400 border border-slate-800 rounded-full px-3 py-1">
           Powered by{" "}
-          <span className="text-teal-400 font-semibold">
-            ConVergo™
-          </span>{" "}
-          & ChatGPT
+          <span className="text-teal-400 font-semibold">ConVergo⟐</span> &amp;
+          ChatGPT
         </div>
       </main>
     );
@@ -88,11 +79,11 @@ export default async function Home() {
   return (
     <main className="min-h-screen bg-slate-950 text-slate-50 flex flex-col items-center px-4 py-10">
       <h1 className="text-3xl md:text-4xl font-semibold mb-2">
-        ConVergo<span className="text-teal-400">™</span>
+        ConVergo<span className="text-teal-400">⟐</span>
       </h1>
       <p className="text-slate-300 mb-8 text-center max-w-xl">
-        The Human–AI Conversation Engine. Below is the live demo feed from
-        <span className="font-semibold"> /api/feed</span>.
+        The Human–AI Conversation Engine. Below is the live demo feed from{" "}
+        <span className="font-semibold">/api/feed</span>.
       </p>
 
       <section className="w-full max-w-3xl space-y-4">
@@ -118,8 +109,9 @@ export default async function Home() {
       </section>
 
       <div className="mt-8 text-xs text-slate-400 border border-slate-800 rounded-full px-3 py-1">
-        Powered by <span className="text-teal-400 font-semibold">ConVergo™</span>{" "}
-        & ChatGPT
+        Powered by{" "}
+        <span className="text-teal-400 font-semibold">ConVergo⟐</span> &amp;
+        ChatGPT
       </div>
     </main>
   );
