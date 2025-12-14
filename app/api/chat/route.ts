@@ -1,46 +1,82 @@
 // app/api/chat/route.ts
 import { NextResponse } from "next/server";
-
-type Msg = { role: "system" | "user" | "assistant"; content: string };
+import { prisma } from "../../../lib/prisma";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-function errorMessage(err: unknown): string {
+type Incoming = {
+  site?: string;
+  message?: string;
+};
+
+function getErrMsg(err: unknown) {
   if (err instanceof Error) return err.message;
   return String(err);
 }
 
 export async function POST(req: Request) {
   try {
-    const body: unknown = await req.json();
+    const body = (await req.json()) as Incoming;
 
-    const parsed = body as { site?: string; messages?: Msg[] };
-    const site = parsed.site ?? "default";
-    const messages = parsed.messages ?? [];
+    const site = body.site ?? "default";
+    const userText = (body.message ?? "").trim();
 
-    const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return NextResponse.json(
-        { error: "Missing OPENAI_API_KEY" },
-        { status: 500 }
-      );
+    if (!userText) {
+      return NextResponse.json({ error: "Missing message" }, { status: 400 });
     }
 
-    const system: Msg = {
-      role: "system",
-      content:
-        `You are an AI diary companion inside ConVergo. ` +
-        `You are speaking to the author of the site. ` +
-        `Be warm, concise, and helpful. ` +
-        `Avoid sensitive personal data. ` +
-        `Site=${site}.`,
-    };
+    // Ensure conversation exists
+    const convo = await prisma.conversation.upsert({
+      where: { site },
+      update: {},
+      create: { site },
+    });
 
-    const payload = {
-      model: "gpt-5.2",
-      messages: [system, ...messages],
-    };
+    // Save user message
+    await prisma.message.create({
+      data: {
+        conversationId: convo.id,
+        role: "user",
+        content: userText,
+      },
+    });
+
+    // If OpenAI key not set yet, reply with a helpful placeholder (still persisted)
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      const reply =
+        "✅ Message saved. Next step: set OPENAI_API_KEY in .env.local (and later in Vercel) to enable AI replies.";
+
+      await prisma.message.create({
+        data: {
+          conversationId: convo.id,
+          role: "assistant",
+          content: reply,
+        },
+      });
+
+      return NextResponse.json({ reply });
+    }
+
+    // Build context from the last 30 messages
+    const history = await prisma.message.findMany({
+      where: { conversationId: convo.id },
+      orderBy: { createdAt: "asc" },
+      take: 30,
+    });
+
+    const messages = [
+      {
+        role: "system",
+        content:
+          "You are an AI diary companion. Be warm, concise, and helpful. Keep responses short unless asked for detail.",
+      },
+      ...history.map((m) => ({
+        role: m.role === "assistant" ? "assistant" : "user",
+        content: m.content,
+      })),
+    ];
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
@@ -48,29 +84,45 @@ export async function POST(req: Request) {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        model: "gpt-5.2",
+        messages,
+      }),
     });
 
     if (!r.ok) {
       const detail = await r.text();
-      return NextResponse.json(
-        { error: "OpenAI error", detail },
-        { status: 500 }
-      );
+      const reply = `⚠️ OpenAI error: ${detail}`;
+
+      await prisma.message.create({
+        data: {
+          conversationId: convo.id,
+          role: "assistant",
+          content: reply,
+        },
+      });
+
+      return NextResponse.json({ reply });
     }
 
-    const data: unknown = await r.json();
-    const d = data as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-
+    const data = (await r.json()) as any;
     const reply =
-      d.choices?.[0]?.message?.content?.trim() ?? "Sorry — no reply returned.";
+      (data?.choices?.[0]?.message?.content as string | undefined)?.trim() ??
+      "Sorry — no reply returned.";
+
+    // Save assistant reply
+    await prisma.message.create({
+      data: {
+        conversationId: convo.id,
+        role: "assistant",
+        content: reply,
+      },
+    });
 
     return NextResponse.json({ reply });
   } catch (err: unknown) {
     return NextResponse.json(
-      { error: "Server error", detail: errorMessage(err) },
+      { error: "Server error", detail: getErrMsg(err) },
       { status: 500 }
     );
   }

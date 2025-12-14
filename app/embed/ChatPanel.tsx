@@ -4,7 +4,7 @@
 import { useMemo, useRef, useState, useEffect } from "react";
 import { useSearchParams } from "next/navigation";
 
-type UiMsg = { who: "author" | "ai"; text: string };
+type UiMsg = { id?: string; who: "author" | "ai"; text: string };
 
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -18,13 +18,9 @@ export default function ChatPanel() {
   const author = useMemo(() => sp.get("author") || "the author", [sp]);
 
   const [input, setInput] = useState<string>("");
-  const [msgs, setMsgs] = useState<UiMsg[]>([
-    {
-      who: "ai",
-      text: "I’m here. Say hello and we’ll start the live conversation.",
-    },
-  ]);
+  const [msgs, setMsgs] = useState<UiMsg[]>([]);
   const [busy, setBusy] = useState<boolean>(false);
+  const [loadingHistory, setLoadingHistory] = useState<boolean>(true);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -32,45 +28,79 @@ export default function ChatPanel() {
     const el = scrollerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [msgs, busy]);
+  }, [msgs, busy, loadingHistory]);
+
+  // Load history on mount / site change
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoadingHistory(true);
+      try {
+        const res = await fetch(`/api/messages?site=${encodeURIComponent(site)}`, {
+          cache: "no-store",
+        });
+        const data: unknown = await res.json();
+        const parsed = data as {
+          messages?: Array<{ id: string; role: string; content: string }>;
+        };
+
+        const loaded =
+          parsed.messages?.map((m) => ({
+            id: m.id,
+            who: m.role === "assistant" ? ("ai" as const) : ("author" as const),
+            text: m.content,
+          })) ?? [];
+
+        if (!cancelled) {
+          setMsgs(
+            loaded.length
+              ? loaded
+              : [{ who: "ai", text: "I’m here. Say hello and we’ll start." }]
+          );
+        }
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setMsgs([{ who: "ai", text: `⚠️ ${errorMessage(err)}` }]);
+        }
+      } finally {
+        if (!cancelled) setLoadingHistory(false);
+      }
+    }
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [site]);
 
   async function send(): Promise<void> {
     const text = input.trim();
     if (!text || busy) return;
 
     setInput("");
-
-    const nextMsgs: UiMsg[] = [...msgs, { who: "author", text }];
-    setMsgs(nextMsgs);
     setBusy(true);
+
+    // Optimistic user message
+    setMsgs((prev) => [...prev, { who: "author", text }]);
 
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          site,
-          messages: nextMsgs.map((m) => ({
-            role: m.who === "ai" ? "assistant" : "user",
-            content: m.text,
-          })),
-        }),
+        body: JSON.stringify({ site, message: text }),
       });
 
       const data: unknown = await res.json();
-
       const parsed = data as { reply?: string; detail?: string; error?: string };
 
       if (!res.ok) {
         throw new Error(parsed.detail || parsed.error || "Chat failed");
       }
 
-      setMsgs([...nextMsgs, { who: "ai", text: parsed.reply ?? "…" }]);
+      setMsgs((prev) => [...prev, { who: "ai", text: parsed.reply ?? "…" }]);
     } catch (err: unknown) {
-      setMsgs([
-        ...nextMsgs,
-        { who: "ai", text: `⚠️ ${errorMessage(err)}` },
-      ]);
+      setMsgs((prev) => [...prev, { who: "ai", text: `⚠️ ${errorMessage(err)}` }]);
     } finally {
       setBusy(false);
     }
@@ -90,9 +120,15 @@ export default function ChatPanel() {
           overflowY: "auto",
         }}
       >
+        {loadingHistory && (
+          <div style={{ fontSize: 12, opacity: 0.6, padding: "6px 4px" }}>
+            Loading history…
+          </div>
+        )}
+
         {msgs.map((m, i) => (
           <div
-            key={i}
+            key={m.id ?? i}
             style={{
               marginBottom: 12,
               display: "flex",
