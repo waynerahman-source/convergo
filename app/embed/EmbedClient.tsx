@@ -1,15 +1,14 @@
 // app/embed/EmbedClient.tsx
 "use client";
 
-import Script from "next/script";
 import { useMemo } from "react";
 import { useSearchParams } from "next/navigation";
+import ChatPanel from "./ChatPanel";
 
 function safeUrl(url: string, fallback: string) {
   try {
     const u = new URL(url);
-    if (u.protocol === "http:" || u.protocol === "https:") return u.toString();
-    return fallback;
+    return u.protocol === "http:" || u.protocol === "https:" ? u.toString() : fallback;
   } catch {
     return fallback;
   }
@@ -47,7 +46,7 @@ export default function EmbedClient() {
         style={{
           fontSize: "0.95rem",
           color: "rgba(15, 23, 42, 0.75)",
-          marginBottom: "1.25rem",
+          marginBottom: "1.0rem",
           maxWidth: "46rem",
           lineHeight: 1.5,
         }}
@@ -70,17 +69,7 @@ export default function EmbedClient() {
         .
       </p>
 
-      <div
-        id="convergo-feed"
-        style={{
-          borderRadius: "0.9rem",
-          border: "1px solid rgba(15, 23, 42, 0.12)",
-          padding: "1rem",
-          background: "rgba(248, 250, 252, 0.9)",
-          maxWidth: "46rem",
-          boxShadow: "0 10px 30px rgba(0,0,0,0.06)",
-        }}
-      />
+      <ChatPanel />
 
       <div
         id="convergo-badge"
@@ -90,8 +79,6 @@ export default function EmbedClient() {
           color: "rgba(15, 23, 42, 0.65)",
         }}
       />
-
-      <Script src="/widget/script" strategy="afterInteractive" />
     </main>
   );
 }
