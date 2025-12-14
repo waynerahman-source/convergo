@@ -1,7 +1,35 @@
 // app/embed/page.tsx
 import Script from "next/script";
 
-export default function EmbedDemo() {
+export const dynamic = "force-dynamic"; // ✅ ensure query params are respected (no caching surprises)
+
+type EmbedPageProps = {
+  searchParams?: Record<string, string | string[] | undefined>;
+};
+
+function getParam(
+  value: string | string[] | undefined,
+  fallback: string
+): string {
+  if (!value) return fallback;
+  return Array.isArray(value) ? value[0] ?? fallback : value;
+}
+
+function safeUrl(url: string, fallback: string) {
+  try {
+    const u = new URL(url);
+    if (u.protocol === "http:" || u.protocol === "https:") return u.toString();
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export default function EmbedDemo({ searchParams }: EmbedPageProps) {
+  const author = getParam(searchParams?.author, "the author");
+  const learnMoreRaw = getParam(searchParams?.learnMore, "https://convergo.live");
+  const learnMore = safeUrl(learnMoreRaw, "https://convergo.live");
+
   return (
     <main
       style={{
@@ -25,9 +53,22 @@ export default function EmbedDemo() {
           lineHeight: 1.5,
         }}
       >
-        between the author of this site and his AI diary companion. This is a
-        live window into a real dialogue — not a chatbot demo, not fiction, and
-        not an advert.
+        between <span style={{ fontWeight: 600 }}>{author}</span> and an AI diary
+        companion{" "}
+        <a
+          href={learnMore}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            color: "rgba(107, 15, 46, 0.95)",
+            fontWeight: 600,
+            textDecoration: "none",
+            marginLeft: 6,
+          }}
+        >
+          [learn more]
+        </a>
+        .
       </p>
 
       <div
@@ -51,7 +92,6 @@ export default function EmbedDemo() {
         }}
       ></div>
 
-      {/* This is the same script partners will embed */}
       <Script src="/widget/script" strategy="afterInteractive" />
     </main>
   );
