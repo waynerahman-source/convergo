@@ -19,6 +19,7 @@ function sanitizeText(input: string): string {
 
   let s = input;
 
+  // Attempt latin1->utf8 repair if mojibake markers present
   if (/[Ãâ]/.test(s)) {
     try {
       const repaired = Buffer.from(s, "latin1").toString("utf8");
@@ -29,12 +30,14 @@ function sanitizeText(input: string): string {
     }
   }
 
+  // Normalize typography to plain ASCII
   s = s
-    .replace(/[\u2018\u2019]/g, "'")
-    .replace(/[\u201C\u201D]/g, '"')
-    .replace(/[\u2013\u2014]/g, "-")
-    .replace(/\u2026/g, "...");
+    .replace(/[\u2018\u2019]/g, "'") // ‘ ’
+    .replace(/[\u201C\u201D]/g, '"') // “ ”
+    .replace(/[\u2013\u2014]/g, "-") // – —
+    .replace(/\u2026/g, "..."); // …
 
+  // Belt + braces for common mojibake sequences
   s = s
     .replace(/â€™/g, "'")
     .replace(/â€˜/g, "'")
@@ -48,21 +51,25 @@ function sanitizeText(input: string): string {
 }
 
 function getOrigin(req: Request) {
-  // Works on Vercel + local
-  return new URL(req.url).origin;
+  return new URL(req.url).origin; // works on Vercel + local
 }
 
-async function saveMessage(origin: string, site: string, role: "user" | "assistant", content: string) {
-  const r = await fetch(`${origin}/api/messages`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ site, role, content }),
-  });
-
-  // If persistence fails, throw a helpful error (so we see it in logs)
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`Persist failed: ${r.status} ${r.statusText} ${t}`);
+// FAIL-SOFT: never throw, never block chat if persistence fails
+async function saveMessage(
+  origin: string,
+  site: string,
+  role: "user" | "assistant",
+  content: string
+) {
+  try {
+    await fetch(`${origin}/api/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ site, role, content }),
+      cache: "no-store",
+    });
+  } catch {
+    // ignore (prod may not have writable DB)
   }
 }
 
@@ -75,7 +82,7 @@ export async function POST(req: Request) {
     const userText = (body.message ?? "").trim();
     if (!userText) return badRequest("Missing message");
 
-    // 1) Persist USER message
+    // Persist USER message (fail-soft)
     await saveMessage(origin, site, "user", sanitizeText(userText));
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -85,15 +92,19 @@ export async function POST(req: Request) {
       return NextResponse.json({ reply });
     }
 
-    // 2) Fetch history from messages API (same origin)
-    const historyRes = await fetch(`${origin}/api/messages?site=${encodeURIComponent(site)}`, {
-      cache: "no-store",
-    });
-    if (!historyRes.ok) {
-      const t = await historyRes.text().catch(() => "");
-      throw new Error(`History load failed: ${historyRes.status} ${historyRes.statusText} ${t}`);
+    // Load history (fail-soft)
+    let historyData: any = { messages: [] };
+    try {
+      const historyRes = await fetch(
+        `${origin}/api/messages?site=${encodeURIComponent(site)}`,
+        { cache: "no-store" }
+      );
+      if (historyRes.ok) {
+        historyData = await historyRes.json();
+      }
+    } catch {
+      // ignore
     }
-    const historyData = await historyRes.json();
 
     const messages = [
       {
@@ -101,7 +112,7 @@ export async function POST(req: Request) {
         content:
           "You are an AI diary companion. Be warm, concise, and helpful. Keep responses short unless asked for detail. Use plain ASCII punctuation.",
       },
-      ...(historyData.messages ?? []).map((m: any) => ({
+      ...((historyData?.messages ?? []) as any[]).map((m) => ({
         role: m.role,
         content: m.content,
       })),
@@ -121,7 +132,7 @@ export async function POST(req: Request) {
     });
 
     if (!r.ok) {
-      const detail = await r.text();
+      const detail = await r.text().catch(() => "");
       const reply = sanitizeText(`OpenAI error: ${detail}`);
       await saveMessage(origin, site, "assistant", reply);
       return NextResponse.json({ reply });
@@ -133,7 +144,7 @@ export async function POST(req: Request) {
 
     const reply = sanitizeText(rawReply);
 
-    // 3) Persist ASSISTANT reply
+    // Persist ASSISTANT reply (fail-soft)
     await saveMessage(origin, site, "assistant", reply);
 
     return NextResponse.json({ reply });
