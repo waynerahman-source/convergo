@@ -5,12 +5,18 @@ import { prisma } from "../../../lib/prisma";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
+type Role = "user" | "assistant";
+
 type ApiMsg = {
   id: string;
-  role: "user" | "assistant";
+  role: Role;
   content: string;
   createdAt: Date;
 };
+
+function toRole(role: string): Role {
+  return role === "assistant" ? "assistant" : "user";
+}
 
 function badRequest(message: string, details?: unknown) {
   return NextResponse.json({ ok: false, error: message, details }, { status: 400 });
@@ -26,23 +32,30 @@ export async function GET(req: Request) {
     create: { site },
   });
 
-  const messages: ApiMsg[] = await prisma.message.findMany({
+  const rows = await prisma.message.findMany({
     where: { conversationId: convo.id },
     orderBy: { createdAt: "asc" },
     take: 200,
-    select: { id: true, role: true, content: true, createdAt: true },
+    select: {
+      id: true,
+      role: true,
+      content: true,
+      createdAt: true,
+    },
   });
+
+  const messages: ApiMsg[] = rows.map((m) => ({
+    id: m.id,
+    role: toRole(m.role),
+    content: m.content,
+    createdAt: m.createdAt,
+  }));
 
   return NextResponse.json({
     ok: true,
     site,
     conversationId: convo.id,
-    messages: messages.map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      createdAt: m.createdAt,
-    })),
+    messages,
   });
 }
 
@@ -63,11 +76,12 @@ export async function POST(req: Request) {
   }
 
   const site = String(body?.site ?? "default").trim();
-  const role = String(body?.role ?? "").trim();
+  const roleRaw = String(body?.role ?? "").trim();
   const content = String(body?.content ?? "").trim();
 
   if (!site) return badRequest("site is required.");
-  if (role !== "user" && role !== "assistant") return badRequest('role must be "user" or "assistant".');
+  if (roleRaw !== "user" && roleRaw !== "assistant")
+    return badRequest('role must be "user" or "assistant".');
   if (!content) return badRequest("content is required.");
   if (content.length > 20000) return badRequest("content too long (max 20000 chars).");
 
@@ -80,7 +94,7 @@ export async function POST(req: Request) {
   const msg = await prisma.message.create({
     data: {
       conversationId: convo.id,
-      role,
+      role: roleRaw,
       content,
     },
     select: { id: true, role: true, content: true, createdAt: true },
@@ -90,6 +104,11 @@ export async function POST(req: Request) {
     ok: true,
     site,
     conversationId: convo.id,
-    message: msg,
+    message: {
+      id: msg.id,
+      role: toRole(msg.role),
+      content: msg.content,
+      createdAt: msg.createdAt,
+    },
   });
 }
