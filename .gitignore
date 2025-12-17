@@ -46,3 +46,9 @@ next-env.d.ts
 prisma/dev.db
 prisma/*.db
 
+# Prisma local dev db
+prisma/dev.db
+
+# Local one-off scripts / files
+Invoke-RestMethod
+convergo-tree.txt
