@@ -13,17 +13,15 @@ function badRequest(message: string) {
   return NextResponse.json({ ok: false, error: message }, { status: 400 });
 }
 
-// Fix common “mojibake” (â€™ etc) + normalize smart punctuation to plain ASCII
+// Fix common mojibake + normalize smart punctuation to plain ASCII
 function sanitizeText(input: string): string {
   if (!input) return input;
 
   let s = input;
 
-  // 1) Try latin1->utf8 repair if mojibake markers are present
   if (/[Ãâ]/.test(s)) {
     try {
       const repaired = Buffer.from(s, "latin1").toString("utf8");
-      // Use repaired only if it looks better (fewer mojibake markers)
       const score = (t: string) => (t.match(/[Ãâ]/g) ?? []).length;
       if (score(repaired) < score(s)) s = repaired;
     } catch {
@@ -31,19 +29,16 @@ function sanitizeText(input: string): string {
     }
   }
 
-  // 2) Normalize typographic punctuation to ASCII (keeps PowerShell happy)
   s = s
-    .replace(/[\u2018\u2019]/g, "'") // ‘ ’
-    .replace(/[\u201C\u201D]/g, '"') // “ ”
-    .replace(/[\u2013\u2014]/g, "-") // – —
-    .replace(/\u2026/g, "..."); // …
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u2026/g, "...");
 
-  // 3) Extra common mojibake sequences (belt + braces)
   s = s
     .replace(/â€™/g, "'")
     .replace(/â€˜/g, "'")
     .replace(/â€œ/g, '"')
-    .replace(/â€\x9d/g, '"')
     .replace(/â€/g, '"')
     .replace(/â€“/g, "-")
     .replace(/â€”/g, "-")
@@ -52,37 +47,52 @@ function sanitizeText(input: string): string {
   return s;
 }
 
-async function saveMessage(site: string, role: "user" | "assistant", content: string) {
-  await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"}/api/messages`, {
+function getOrigin(req: Request) {
+  // Works on Vercel + local
+  return new URL(req.url).origin;
+}
+
+async function saveMessage(origin: string, site: string, role: "user" | "assistant", content: string) {
+  const r = await fetch(`${origin}/api/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ site, role, content }),
   });
+
+  // If persistence fails, throw a helpful error (so we see it in logs)
+  if (!r.ok) {
+    const t = await r.text().catch(() => "");
+    throw new Error(`Persist failed: ${r.status} ${r.statusText} ${t}`);
+  }
 }
 
 export async function POST(req: Request) {
   try {
-    const body = (await req.json()) as Incoming;
+    const origin = getOrigin(req);
 
+    const body = (await req.json()) as Incoming;
     const site = (body.site ?? "default").trim();
     const userText = (body.message ?? "").trim();
-
     if (!userText) return badRequest("Missing message");
 
-    // Persist USER message
-    await saveMessage(site, "user", sanitizeText(userText));
+    // 1) Persist USER message
+    await saveMessage(origin, site, "user", sanitizeText(userText));
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       const reply = "Message saved. Set OPENAI_API_KEY to enable AI replies.";
-      await saveMessage(site, "assistant", reply);
+      await saveMessage(origin, site, "assistant", reply);
       return NextResponse.json({ reply });
     }
 
-    // Fetch history
-    const historyRes = await fetch(
-      `${process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"}/api/messages?site=${encodeURIComponent(site)}`
-    );
+    // 2) Fetch history from messages API (same origin)
+    const historyRes = await fetch(`${origin}/api/messages?site=${encodeURIComponent(site)}`, {
+      cache: "no-store",
+    });
+    if (!historyRes.ok) {
+      const t = await historyRes.text().catch(() => "");
+      throw new Error(`History load failed: ${historyRes.status} ${historyRes.statusText} ${t}`);
+    }
     const historyData = await historyRes.json();
 
     const messages = [
@@ -113,7 +123,7 @@ export async function POST(req: Request) {
     if (!r.ok) {
       const detail = await r.text();
       const reply = sanitizeText(`OpenAI error: ${detail}`);
-      await saveMessage(site, "assistant", reply);
+      await saveMessage(origin, site, "assistant", reply);
       return NextResponse.json({ reply });
     }
 
@@ -123,7 +133,9 @@ export async function POST(req: Request) {
 
     const reply = sanitizeText(rawReply);
 
-    await saveMessage(site, "assistant", reply);
+    // 3) Persist ASSISTANT reply
+    await saveMessage(origin, site, "assistant", reply);
+
     return NextResponse.json({ reply });
   } catch (err) {
     return NextResponse.json(
