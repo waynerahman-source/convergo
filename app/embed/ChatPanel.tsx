@@ -6,9 +6,44 @@ import { useSearchParams } from "next/navigation";
 
 type UiMsg = { id?: string; who: "author" | "ai"; text: string };
 
+type MessagesApiResponse = {
+  site?: string;
+  conversationId?: string;
+  messages?: Array<{ id: string; role: "user" | "assistant" | string; content: string }>;
+};
+
+type ChatApiResponse = { reply?: string; detail?: string; error?: string };
+
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
+}
+
+async function readJsonOrThrow<T>(res: Response): Promise<T> {
+  const contentType = res.headers.get("content-type") || "";
+  const text = await res.text(); // read once
+
+  if (!res.ok) {
+    // Include body snippet when server sends HTML or plain text
+    const snippet = text ? text.slice(0, 400) : "(empty body)";
+    throw new Error(`HTTP ${res.status} ${res.statusText}: ${snippet}`);
+  }
+
+  if (!text.trim()) {
+    throw new Error("Server returned an empty response (expected JSON).");
+  }
+
+  if (!contentType.toLowerCase().includes("application/json")) {
+    const snippet = text.slice(0, 400);
+    throw new Error(`Expected JSON but got "${contentType}". Body: ${snippet}`);
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const snippet = text.slice(0, 400);
+    throw new Error(`Invalid JSON returned by server. Body: ${snippet}`);
+  }
 }
 
 export default function ChatPanel() {
@@ -40,10 +75,8 @@ export default function ChatPanel() {
         const res = await fetch(`/api/messages?site=${encodeURIComponent(site)}`, {
           cache: "no-store",
         });
-        const data: unknown = await res.json();
-        const parsed = data as {
-          messages?: Array<{ id: string; role: string; content: string }>;
-        };
+
+        const parsed = await readJsonOrThrow<MessagesApiResponse>(res);
 
         const loaded =
           parsed.messages?.map((m) => ({
@@ -61,7 +94,12 @@ export default function ChatPanel() {
         }
       } catch (err: unknown) {
         if (!cancelled) {
-          setMsgs([{ who: "ai", text: `⚠️ ${errorMessage(err)}` }]);
+          setMsgs([
+            {
+              who: "ai",
+              text: `⚠️ Failed to load history: ${errorMessage(err)}`,
+            },
+          ]);
         }
       } finally {
         if (!cancelled) setLoadingHistory(false);
@@ -91,16 +129,14 @@ export default function ChatPanel() {
         body: JSON.stringify({ site, message: text }),
       });
 
-      const data: unknown = await res.json();
-      const parsed = data as { reply?: string; detail?: string; error?: string };
-
-      if (!res.ok) {
-        throw new Error(parsed.detail || parsed.error || "Chat failed");
-      }
+      const parsed = await readJsonOrThrow<ChatApiResponse>(res);
 
       setMsgs((prev) => [...prev, { who: "ai", text: parsed.reply ?? "…" }]);
     } catch (err: unknown) {
-      setMsgs((prev) => [...prev, { who: "ai", text: `⚠️ ${errorMessage(err)}` }]);
+      setMsgs((prev) => [
+        ...prev,
+        { who: "ai", text: `⚠️ ${errorMessage(err)}` },
+      ]);
     } finally {
       setBusy(false);
     }
