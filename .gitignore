@@ -52,3 +52,6 @@ prisma/dev.db
 # Local one-off scripts / files
 Invoke-RestMethod
 convergo-tree.txt
+
+.vercel
+.env*.local
