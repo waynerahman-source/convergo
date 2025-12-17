@@ -1,6 +1,5 @@
-// app/api/chat/route.ts
+// C:\Users\Usuario\Projects\convergo\app\api\chat\route.ts
 import { NextResponse } from "next/server";
-import { prisma } from "../../../lib/prisma";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -10,82 +9,90 @@ type Incoming = {
   message?: string;
 };
 
-// Prisma may surface enums as string at build time depending on config.
-// So we accept string here and normalize.
-type HistoryRow = {
-  role: string;
-  content: string;
-};
-
-function getErrMsg(err: unknown) {
-  if (err instanceof Error) return err.message;
-  return String(err);
+function badRequest(message: string) {
+  return NextResponse.json({ ok: false, error: message }, { status: 400 });
 }
 
-function toChatRole(role: string): "user" | "assistant" {
-  return role === "assistant" ? "assistant" : "user";
+// Fix common “mojibake” (â€™ etc) + normalize smart punctuation to plain ASCII
+function sanitizeText(input: string): string {
+  if (!input) return input;
+
+  let s = input;
+
+  // 1) Try latin1->utf8 repair if mojibake markers are present
+  if (/[Ãâ]/.test(s)) {
+    try {
+      const repaired = Buffer.from(s, "latin1").toString("utf8");
+      // Use repaired only if it looks better (fewer mojibake markers)
+      const score = (t: string) => (t.match(/[Ãâ]/g) ?? []).length;
+      if (score(repaired) < score(s)) s = repaired;
+    } catch {
+      // ignore
+    }
+  }
+
+  // 2) Normalize typographic punctuation to ASCII (keeps PowerShell happy)
+  s = s
+    .replace(/[\u2018\u2019]/g, "'") // ‘ ’
+    .replace(/[\u201C\u201D]/g, '"') // “ ”
+    .replace(/[\u2013\u2014]/g, "-") // – —
+    .replace(/\u2026/g, "..."); // …
+
+  // 3) Extra common mojibake sequences (belt + braces)
+  s = s
+    .replace(/â€™/g, "'")
+    .replace(/â€˜/g, "'")
+    .replace(/â€œ/g, '"')
+    .replace(/â€\x9d/g, '"')
+    .replace(/â€/g, '"')
+    .replace(/â€“/g, "-")
+    .replace(/â€”/g, "-")
+    .replace(/â€¦/g, "...");
+
+  return s;
+}
+
+async function saveMessage(site: string, role: "user" | "assistant", content: string) {
+  await fetch(`${process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"}/api/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ site, role, content }),
+  });
 }
 
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as Incoming;
 
-    const site = body.site ?? "default";
+    const site = (body.site ?? "default").trim();
     const userText = (body.message ?? "").trim();
 
-    if (!userText) {
-      return NextResponse.json({ error: "Missing message" }, { status: 400 });
-    }
+    if (!userText) return badRequest("Missing message");
 
-    // Ensure conversation exists
-    const convo = await prisma.conversation.upsert({
-      where: { site },
-      update: {},
-      create: { site },
-    });
+    // Persist USER message
+    await saveMessage(site, "user", sanitizeText(userText));
 
-    // Save user message
-    await prisma.message.create({
-      data: {
-        conversationId: convo.id,
-        role: "user",
-        content: userText,
-      },
-    });
-
-    // If OpenAI key not set yet, reply with a helpful placeholder (still persisted)
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      const reply =
-        "✅ Message saved. Next step: set OPENAI_API_KEY in .env.local (and later in Vercel) to enable AI replies.";
-
-      await prisma.message.create({
-        data: {
-          conversationId: convo.id,
-          role: "assistant",
-          content: reply,
-        },
-      });
-
+      const reply = "Message saved. Set OPENAI_API_KEY to enable AI replies.";
+      await saveMessage(site, "assistant", reply);
       return NextResponse.json({ reply });
     }
 
-    // Build context from the last 30 messages (only role + content)
-    const history: HistoryRow[] = await prisma.message.findMany({
-      where: { conversationId: convo.id },
-      orderBy: { createdAt: "asc" },
-      take: 30,
-      select: { role: true, content: true },
-    });
+    // Fetch history
+    const historyRes = await fetch(
+      `${process.env.NEXT_PUBLIC_BASE_URL ?? "http://localhost:3000"}/api/messages?site=${encodeURIComponent(site)}`
+    );
+    const historyData = await historyRes.json();
 
     const messages = [
       {
         role: "system" as const,
         content:
-          "You are an AI diary companion. Be warm, concise, and helpful. Keep responses short unless asked for detail.",
+          "You are an AI diary companion. Be warm, concise, and helpful. Keep responses short unless asked for detail. Use plain ASCII punctuation.",
       },
-      ...history.map((m: HistoryRow) => ({
-        role: toChatRole(m.role),
+      ...(historyData.messages ?? []).map((m: any) => ({
+        role: m.role,
         content: m.content,
       })),
       { role: "user" as const, content: userText },
@@ -105,40 +112,22 @@ export async function POST(req: Request) {
 
     if (!r.ok) {
       const detail = await r.text();
-      const reply = `⚠️ OpenAI error: ${detail}`;
-
-      await prisma.message.create({
-        data: {
-          conversationId: convo.id,
-          role: "assistant",
-          content: reply,
-        },
-      });
-
+      const reply = sanitizeText(`OpenAI error: ${detail}`);
+      await saveMessage(site, "assistant", reply);
       return NextResponse.json({ reply });
     }
 
-    const data = (await r.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
+    const data = await r.json();
+    const rawReply =
+      data?.choices?.[0]?.message?.content?.trim() ?? "Sorry - no reply returned.";
 
-    const reply =
-      data?.choices?.[0]?.message?.content?.trim() ??
-      "Sorry — no reply returned.";
+    const reply = sanitizeText(rawReply);
 
-    // Save assistant reply
-    await prisma.message.create({
-      data: {
-        conversationId: convo.id,
-        role: "assistant",
-        content: reply,
-      },
-    });
-
+    await saveMessage(site, "assistant", reply);
     return NextResponse.json({ reply });
-  } catch (err: unknown) {
+  } catch (err) {
     return NextResponse.json(
-      { error: "Server error", detail: getErrMsg(err) },
+      { ok: false, error: "Server error", detail: String(err) },
       { status: 500 }
     );
   }

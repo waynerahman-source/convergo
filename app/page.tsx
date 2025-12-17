@@ -1,29 +1,19 @@
-// app/page.tsx
+// C:\Users\Usuario\Projects\convergo\app\page.tsx
 import { getBaseUrl } from "../lib/baseUrl";
 
-type ConversationUnit = {
+type FeedItem = {
   id: string;
-  timestamp: string;
-  speaker: "H" | "A";
-  text: string;
-  category: string[];
-  tags: {
-    emotion?: string;
-    intent?: string;
-    topic?: string;
-    tone?: string;
-  };
-  meta: {
-    sequence: number;
-    token_count?: number;
-  };
+  site: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
 };
 
 type FeedResponse = {
-  version: string;
-  stream_id: string;
-  mode: string;
-  data: ConversationUnit[];
+  ok: boolean;
+  limit: number;
+  site: string;
+  items: FeedItem[];
 };
 
 export const dynamic = "force-dynamic";
@@ -35,7 +25,7 @@ export default async function Home() {
   let feed: FeedResponse | null = null;
 
   try {
-    const res = await fetch(`${baseUrl}/api/feed`, {
+    const res = await fetch(`${baseUrl}/api/feed?site=default&limit=50`, {
       cache: "no-store",
     });
 
@@ -53,7 +43,7 @@ export default async function Home() {
     console.error("Error loading feed:", err);
   }
 
-  if (!feed) {
+  if (!feed || !feed.ok) {
     return (
       <main className="min-h-screen bg-slate-950 text-slate-50 flex flex-col items-center justify-center px-4 py-10">
         <h1 className="text-3xl md:text-4xl font-semibold mb-4">
@@ -63,12 +53,10 @@ export default async function Home() {
           The Human–AI Conversation Engine.
         </p>
         <p className="text-slate-400 text-sm text-center max-w-md">
-          The live demo feed is temporarily unavailable. Please try again in a
-          moment.
+          The live demo feed is temporarily unavailable. Please try again in a moment.
         </p>
         <div className="mt-8 text-xs text-slate-400 border border-slate-800 rounded-full px-3 py-1">
-          Powered by <span className="text-teal-400 font-semibold">ConVergo™</span>{" "}
-          & ChatGPT
+          Powered by <span className="text-teal-400 font-semibold">ConVergo™</span> & ChatGPT
         </div>
       </main>
     );
@@ -85,30 +73,29 @@ export default async function Home() {
       </p>
 
       <section className="w-full max-w-3xl space-y-4">
-        {feed.data.map((cu) => (
+        {(feed.items ?? []).map((m) => (
           <article
-            key={cu.id}
+            key={m.id}
             className="rounded-xl border border-slate-800 bg-slate-900/60 p-4"
           >
             <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
               <span>
-                {cu.speaker === "H" ? "Human" : "AI"} • #{cu.meta.sequence}
+                {m.role === "user" ? "Human" : "AI"} • {m.site}
               </span>
               <span>
-                {new Date(cu.timestamp).toLocaleTimeString([], {
+                {new Date(m.createdAt).toLocaleTimeString([], {
                   hour: "2-digit",
                   minute: "2-digit",
                 })}
               </span>
             </div>
-            <p className="text-sm leading-relaxed">{cu.text}</p>
+            <p className="text-sm leading-relaxed whitespace-pre-wrap">{m.content}</p>
           </article>
         ))}
       </section>
 
       <div className="mt-8 text-xs text-slate-400 border border-slate-800 rounded-full px-3 py-1">
-        Powered by <span className="text-teal-400 font-semibold">ConVergo™</span>{" "}
-        & ChatGPT
+        Powered by <span className="text-teal-400 font-semibold">ConVergo™</span> & ChatGPT
       </div>
     </main>
   );
