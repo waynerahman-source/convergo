@@ -1,22 +1,19 @@
-// lib/prisma.ts
+// C:\Users\Usuario\Projects\convergo\lib\prisma.ts
 import { PrismaClient } from "@prisma/client";
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-function makePrismaClient() {
-  const dbUrl = process.env.DATABASE_URL;
-
-  if (!dbUrl) {
-    throw new Error(
-      "DATABASE_URL is missing. Expected something like: file:./prisma/dev.db"
-    );
-  }
-
-  const adapter = new PrismaBetterSqlite3({ url: dbUrl });
-  return new PrismaClient({ adapter });
+function must(name: string) {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} is missing`);
+  return v;
 }
 
-export const prisma = globalForPrisma.prisma ?? makePrismaClient();
+export const prisma =
+  globalForPrisma.prisma ??
+  new PrismaClient({
+    adapter: new PrismaPg({ connectionString: must("DATABASE_URL") }),
+  });
 
 if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = prisma;
