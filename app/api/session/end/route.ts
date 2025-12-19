@@ -26,8 +26,11 @@ function makeRequestId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function normalizeMode(mode?: Body["mode"]): "transcript" | "article" {
-  return mode === "article" ? "article" : "transcript";
+// ARTICLE-FIRST DEFAULT:
+// - If mode === "transcript" => transcript
+// - Else => article
+function resolveMode(mode?: Body["mode"]): "transcript" | "article" {
+  return mode === "transcript" ? "transcript" : "article";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -56,11 +59,7 @@ function extractWpAuthStatus(err: unknown): number | null {
   const statusCode = err["statusCode"];
 
   const direct = Number(
-    typeof status === "number"
-      ? status
-      : typeof statusCode === "number"
-        ? statusCode
-        : NaN
+    typeof status === "number" ? status : typeof statusCode === "number" ? statusCode : NaN
   );
   if (Number.isFinite(direct) && direct > 0) return direct;
 
@@ -77,27 +76,24 @@ function extractWpAuthStatus(err: unknown): number | null {
   return null;
 }
 
-function jsonError(
-  status: number,
-  payload: Omit<ErrorPayload, "ok"> & { ok?: false }
-) {
+function jsonError(status: number, payload: Omit<ErrorPayload, "ok"> & { ok?: false }) {
   return NextResponse.json({ ok: false, ...payload }, { status });
 }
 
 export async function POST(req: Request) {
   const requestId = makeRequestId();
 
-  // We keep these in outer scope so they appear in the final catch/logs
+  // Outer scope so we can log on unhandled error
   let site = "default";
   let sessionId = "";
-  let mode: "transcript" | "article" = "transcript";
+  let mode: "transcript" | "article" = "article"; // default is ARTICLE
 
   try {
     const body = (await req.json().catch(() => ({}))) as Body;
 
     site = (body.site ?? "default").trim() || "default";
     sessionId = (body.sessionId ?? "").trim();
-    mode = normalizeMode(body.mode);
+    mode = resolveMode(body.mode);
 
     if (!sessionId) {
       return jsonError(400, {
@@ -136,7 +132,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // 3) Mark session ended (idempotent: if already ended, keep original endedAt)
+    // 3) Mark session ended (idempotent)
     const now = new Date();
     const ended = await prisma.session.update({
       where: { id: sessionId },
@@ -152,114 +148,4 @@ export async function POST(req: Request) {
     });
 
     const normalized = msgs.map((m) => ({
-      role: (m.role === "assistant" ? "assistant" : "user") as "user" | "assistant",
-      content: m.content,
-      createdAt: m.createdAt,
-    }));
-
-    if (normalized.length === 0) {
-      return jsonError(400, {
-        error: "NO_MESSAGES",
-        message: "No messages found for this session",
-        requestId,
-        site,
-        sessionId,
-      });
-    }
-
-    // 5) Create WP draft
-    let wp: { id: number | string; link?: string | null };
-
-    try {
-      wp =
-        mode === "article"
-          ? await createWpArticleDraftFromSession({
-              site,
-              startedAt: ended.startedAt,
-              messages: normalized,
-            })
-          : await createWpDraftFromSession({
-              site,
-              startedAt: ended.startedAt,
-              messages: normalized,
-            });
-    } catch (err) {
-      const status = extractWpAuthStatus(err);
-
-      if (status === 401) {
-        return jsonError(502, {
-          error: "WP_AUTH_FAILED",
-          message:
-            "WordPress rejected post creation (401 Unauthorized). Check WP_USERNAME / WP_APP_PASSWORD and Application Password settings.",
-          requestId,
-          site,
-          sessionId,
-        });
-      }
-
-      if (status === 403) {
-        return jsonError(502, {
-          error: "WP_FORBIDDEN",
-          message:
-            "WordPress rejected post creation (403 Forbidden). Check WP user role/capabilities and REST permissions.",
-          requestId,
-          site,
-          sessionId,
-        });
-      }
-
-      console.error(`[session:end][${requestId}] WP draft creation failed`, {
-        site,
-        sessionId,
-        mode,
-        message: safeMessage(err),
-      });
-
-      return jsonError(502, {
-        error: "WP_DRAFT_FAILED",
-        message: safeMessage(err),
-        requestId,
-        site,
-        sessionId,
-      });
-    }
-
-    // 6) Success
-    console.info(`[session:end][${requestId}] Draft created`, {
-      site,
-      sessionId,
-      mode,
-      messageCount: msgs.length,
-      wpPostId: wp.id,
-      wpLink: wp.link ?? null,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      requestId,
-      site,
-      sessionId,
-      mode,
-      startedAt: ended.startedAt,
-      endedAt: ended.endedAt,
-      messageCount: msgs.length,
-      wpPostId: wp.id,
-      wpLink: wp.link ?? null,
-    });
-  } catch (err) {
-    console.error(`[session:end][${requestId}] Unhandled error`, {
-      site,
-      sessionId,
-      mode,
-      message: safeMessage(err),
-    });
-
-    return jsonError(500, {
-      error: "END_SESSION_FAILED",
-      message: safeMessage(err),
-      requestId,
-      site,
-      sessionId,
-    });
-  }
-}
+      role: (m.role === "assistant" ?
