@@ -19,58 +19,125 @@ type PostBody = {
   content?: string;
 };
 
+function json(ok: boolean, data: Record<string, unknown>, status = 200) {
+  return NextResponse.json({ ok, ...data }, { status });
+}
+
+function isAuthorRequest(searchParams: URLSearchParams): boolean {
+  const all = (searchParams.get("all") ?? "").trim() === "1";
+  if (!all) return false;
+
+  const provided = (searchParams.get("authorKey") ?? "").trim();
+  const expected = (process.env.CONVERGO_AUTHOR_KEY ?? "").trim();
+
+  // If no key configured, author/all mode is disabled by default (safer).
+  if (!expected) return false;
+
+  return provided.length > 0 && provided === expected;
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const site = (searchParams.get("site") ?? "default").trim();
-  const sessionId = (searchParams.get("sessionId") ?? "").trim();
 
+  const site = (searchParams.get("site") ?? "default").trim();
+  const requestedSessionId = (searchParams.get("sessionId") ?? "").trim();
+
+  // Ensure conversation exists
   const convo = await prisma.conversation.upsert({
     where: { site },
     update: {},
     create: { site },
   });
 
-  // If sessionId provided, validate it belongs to this conversation
-  let sessionFilter: { sessionId?: string } = {};
-  if (sessionId) {
+  // 1) If explicit sessionId provided: validate and return that session's messages (author or visitor)
+  if (requestedSessionId) {
     const session = await prisma.session.findUnique({
-      where: { id: sessionId },
+      where: { id: requestedSessionId },
       select: { id: true, conversationId: true },
     });
 
     if (!session || session.conversationId !== convo.id) {
-      return NextResponse.json(
-        { ok: false, error: "Invalid sessionId for this site" },
-        { status: 400 }
-      );
+      return json(false, { error: "Invalid sessionId for this site" }, 400);
     }
 
-    sessionFilter = { sessionId: session.id };
+    const messages: ApiMsg[] = await prisma.message.findMany({
+      where: { conversationId: convo.id, sessionId: session.id },
+      orderBy: { createdAt: "asc" },
+      take: 200,
+      select: { id: true, role: true, content: true, createdAt: true },
+    });
+
+    return json(true, {
+      site,
+      conversationId: convo.id,
+      sessionId: session.id,
+      messages: messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        createdAt: m.createdAt,
+      })),
+    });
+  }
+
+  // 2) Author-only: allow "all history across sessions"
+  if (isAuthorRequest(searchParams)) {
+    const messages: ApiMsg[] = await prisma.message.findMany({
+      where: { conversationId: convo.id },
+      orderBy: { createdAt: "asc" },
+      take: 200,
+      select: { id: true, role: true, content: true, createdAt: true },
+    });
+
+    return json(true, {
+      site,
+      conversationId: convo.id,
+      sessionId: null,
+      messages: messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        content: m.content,
+        createdAt: m.createdAt,
+      })),
+      scope: "all",
+    });
+  }
+
+  // 3) Default (visitor-safe): return ONLY the latest session messages (if any)
+  const latest = await prisma.session.findFirst({
+    where: { conversationId: convo.id },
+    orderBy: { startedAt: "desc" },
+    select: { id: true, startedAt: true },
+  });
+
+  if (!latest) {
+    return json(true, {
+      site,
+      conversationId: convo.id,
+      sessionId: null,
+      messages: [],
+      scope: "latest",
+    });
   }
 
   const messages: ApiMsg[] = await prisma.message.findMany({
-    where: { conversationId: convo.id, ...sessionFilter },
+    where: { conversationId: convo.id, sessionId: latest.id },
     orderBy: { createdAt: "asc" },
     take: 200,
-    select: {
-      id: true,
-      role: true,
-      content: true,
-      createdAt: true,
-    },
+    select: { id: true, role: true, content: true, createdAt: true },
   });
 
-  return NextResponse.json({
-    ok: true,
+  return json(true, {
     site,
     conversationId: convo.id,
-    sessionId: sessionId || null,
+    sessionId: latest.id,
     messages: messages.map((m) => ({
       id: m.id,
       role: m.role,
       content: m.content,
       createdAt: m.createdAt,
     })),
+    scope: "latest",
   });
 }
 
@@ -84,17 +151,17 @@ export async function POST(req: Request) {
   const sessionId = body.sessionId ? String(body.sessionId).trim() : "";
 
   if (!content) {
-    return NextResponse.json({ ok: false, error: "Missing content" }, { status: 400 });
+    return json(false, { error: "Missing content" }, 400);
   }
 
-  // ensure conversation exists
+  // Ensure conversation exists
   const convo = await prisma.conversation.upsert({
     where: { site },
     update: {},
     create: { site },
   });
 
-  // if sessionId provided, verify it belongs to this conversation
+  // If sessionId provided, verify it belongs to this conversation
   let sessionIdToUse: string | undefined = undefined;
 
   if (sessionId) {
@@ -104,18 +171,12 @@ export async function POST(req: Request) {
     });
 
     if (!session || session.conversationId !== convo.id) {
-      return NextResponse.json(
-        { ok: false, error: "Invalid sessionId for this site" },
-        { status: 400 }
-      );
+      return json(false, { error: "Invalid sessionId for this site" }, 400);
     }
 
     // MVP rule: don’t allow writing into a closed session
     if (session.endedAt) {
-      return NextResponse.json(
-        { ok: false, error: "Session already ended" },
-        { status: 400 }
-      );
+      return json(false, { error: "Session already ended" }, 400);
     }
 
     sessionIdToUse = session.id;
@@ -131,8 +192,7 @@ export async function POST(req: Request) {
     select: { id: true, role: true, content: true, createdAt: true },
   });
 
-  return NextResponse.json({
-    ok: true,
+  return json(true, {
     site,
     conversationId: convo.id,
     message,
