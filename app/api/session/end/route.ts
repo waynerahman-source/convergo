@@ -48,11 +48,6 @@ function safeMessage(err: unknown): string {
 }
 
 function extractWpAuthStatus(err: unknown): number | null {
-  // Detect WP auth failures from whatever the engine throws.
-  // Supports:
-  // - err.status / err.statusCode
-  // - err.response?.status (axios-like)
-  // - message containing "WP error 401" etc.
   if (!isRecord(err)) return null;
 
   const status = err["status"];
@@ -83,10 +78,9 @@ function jsonError(status: number, payload: Omit<ErrorPayload, "ok"> & { ok?: fa
 export async function POST(req: Request) {
   const requestId = makeRequestId();
 
-  // Outer scope so we can log on unhandled error
   let site = "default";
   let sessionId = "";
-  let mode: "transcript" | "article" = "article"; // default is ARTICLE
+  let mode: "transcript" | "article" = "article";
 
   try {
     const body = (await req.json().catch(() => ({}))) as Body;
@@ -104,7 +98,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // 1) Resolve conversation for site
     const convo = await prisma.conversation.findUnique({ where: { site } });
     if (!convo) {
       return jsonError(404, {
@@ -116,7 +109,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // 2) Find the session and ensure it belongs to the site conversation
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
       select: { id: true, startedAt: true, endedAt: true, conversationId: true },
@@ -132,7 +124,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // 3) Mark session ended (idempotent)
     const now = new Date();
     const ended = await prisma.session.update({
       where: { id: sessionId },
@@ -140,12 +131,122 @@ export async function POST(req: Request) {
       select: { startedAt: true, endedAt: true },
     });
 
-    // 4) Pull messages for this session
     const msgs = await prisma.message.findMany({
       where: { conversationId: convo.id, sessionId },
       orderBy: { createdAt: "asc" },
       select: { role: true, content: true, createdAt: true },
     });
 
-    const normalized = msgs.map((m) => ({
-      role: (m.role === "assistant" ?
+    const normalized = msgs.map((m) => {
+      const role = m.role === "assistant" ? "assistant" : "user";
+      return {
+        role,
+        content: m.content,
+        createdAt: m.createdAt,
+      } as const;
+    });
+
+    if (normalized.length === 0) {
+      return jsonError(400, {
+        error: "NO_MESSAGES",
+        message: "No messages found for this session",
+        requestId,
+        site,
+        sessionId,
+      });
+    }
+
+    let wp: { id: number | string; link?: string | null };
+
+    try {
+      wp =
+        mode === "transcript"
+          ? await createWpDraftFromSession({
+              site,
+              startedAt: ended.startedAt,
+              messages: normalized,
+            })
+          : await createWpArticleDraftFromSession({
+              site,
+              startedAt: ended.startedAt,
+              messages: normalized,
+            });
+    } catch (err) {
+      const status = extractWpAuthStatus(err);
+
+      if (status === 401) {
+        return jsonError(502, {
+          error: "WP_AUTH_FAILED",
+          message:
+            "WordPress rejected post creation (401 Unauthorized). Check WP_USERNAME / WP_APP_PASSWORD and Application Password settings.",
+          requestId,
+          site,
+          sessionId,
+        });
+      }
+
+      if (status === 403) {
+        return jsonError(502, {
+          error: "WP_FORBIDDEN",
+          message:
+            "WordPress rejected post creation (403 Forbidden). Check WP user role/capabilities and REST permissions.",
+          requestId,
+          site,
+          sessionId,
+        });
+      }
+
+      console.error(`[session:end][${requestId}] WP draft creation failed`, {
+        site,
+        sessionId,
+        mode,
+        message: safeMessage(err),
+      });
+
+      return jsonError(502, {
+        error: "WP_DRAFT_FAILED",
+        message: safeMessage(err),
+        requestId,
+        site,
+        sessionId,
+      });
+    }
+
+    console.info(`[session:end][${requestId}] Draft created`, {
+      site,
+      sessionId,
+      mode,
+      messageCount: normalized.length,
+      wpPostId: wp.id,
+      wpLink: wp.link ?? null,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      requestId,
+      site,
+      sessionId,
+      mode,
+      startedAt: ended.startedAt,
+      endedAt: ended.endedAt,
+      messageCount: normalized.length,
+      wpPostId: wp.id,
+      wpLink: wp.link ?? null,
+    });
+  } catch (err) {
+    console.error(`[session:end][${requestId}] Unhandled error`, {
+      site,
+      sessionId,
+      mode,
+      message: safeMessage(err),
+    });
+
+    return jsonError(500, {
+      error: "END_SESSION_FAILED",
+      message: safeMessage(err),
+      requestId,
+      site,
+      sessionId,
+    });
+  }
+}
