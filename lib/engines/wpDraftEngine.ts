@@ -7,41 +7,116 @@ type Msg = {
   createdAt: Date;
 };
 
-function must(name: string) {
+type WpPostResponse = {
+  id: number;
+  link?: string;
+};
+
+class WpError extends Error {
+  public readonly status: number;
+  public readonly bodyText: string;
+
+  constructor(status: number, bodyText: string, message?: string) {
+    super(message ?? `WP error ${status}`);
+    this.name = "WpError";
+    this.status = status;
+    this.bodyText = bodyText;
+  }
+}
+
+function mustEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`${name} is missing`);
   return v;
 }
 
-// Basic WordPress REST create-post (draft)
-async function wpCreateDraft(title: string, contentHtml: string) {
-  const base = must("WP_BASE_URL").replace(/\/$/, "");
-  const username = must("WP_USERNAME");
-  const appPassword = must("WP_APP_PASSWORD");
-
-  const auth = Buffer.from(`${username}:${appPassword}`).toString("base64");
-
-  const r = await fetch(`${base}/wp-json/wp/v2/posts`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      title,
-      content: contentHtml,
-      status: "draft",
-    }),
-  });
-
-  const text = await r.text();
-  if (!r.ok) throw new Error(`WP error ${r.status}: ${text}`);
-
-  const data = JSON.parse(text) as { id: number; link?: string };
-  return data;
+function normalizeBaseUrl(url: string): string {
+  return url.replace(/\/$/, "");
 }
 
-function escapeHtml(s: string) {
+function encodeBasicAuth(username: string, appPassword: string): string {
+  // WP Application Passwords can be copied with spaces; accept either.
+  const cleanedPassword = appPassword.replace(/\s+/g, "");
+  return Buffer.from(`${username}:${cleanedPassword}`).toString("base64");
+}
+
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`WP request timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// Basic WordPress REST create-post (draft)
+async function wpCreateDraft(title: string, contentHtml: string): Promise<WpPostResponse> {
+  const base = normalizeBaseUrl(mustEnv("WP_BASE_URL"));
+  const username = mustEnv("WP_USERNAME");
+  const appPassword = mustEnv("WP_APP_PASSWORD");
+
+  const auth = encodeBasicAuth(username, appPassword);
+  const url = `${base}/wp-json/wp/v2/posts`;
+
+  const timeoutMs = Number(process.env.WP_TIMEOUT_MS ?? "15000");
+  const r = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        title,
+        content: contentHtml,
+        status: "draft",
+      }),
+    },
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000
+  );
+
+  const text = await r.text();
+
+  if (!r.ok) {
+    // Throw a typed error so callers can map 401/403 cleanly.
+    throw new WpError(r.status, text, `WP error ${r.status}: ${text}`);
+  }
+
+  // WP usually returns JSON; but be defensive.
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`WP returned non-JSON response (status ${r.status}): ${text.slice(0, 500)}`);
+  }
+
+  if (
+    typeof data !== "object" ||
+    data === null ||
+    !("id" in data) ||
+    typeof (data as Record<string, unknown>).id !== "number"
+  ) {
+    throw new Error(`WP response missing expected fields: ${text.slice(0, 500)}`);
+  }
+
+  const obj = data as { id: number; link?: string };
+  return { id: obj.id, link: obj.link };
+}
+
+function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -50,18 +125,19 @@ function escapeHtml(s: string) {
     .replace(/'/g, "&#039;");
 }
 
-function toTitle(site: string, startedAt: Date) {
+function toTitle(site: string, startedAt: Date): string {
   const d = startedAt.toISOString().slice(0, 10);
   return `ConVergo Draft — ${site} — ${d}`;
 }
 
-function toHtml(messages: Msg[]) {
+function toHtml(messages: Msg[]): string {
   // MVP: clean chronological transcript, lightly formatted
   const blocks = messages.map((m) => {
     const who = m.role === "user" ? "Human" : "AI";
-    const time = new Date(m.createdAt).toISOString();
+    const timeIso = new Date(m.createdAt).toISOString();
+
     return `
-      <p><strong>${who}</strong> <em style="color:#666">(${escapeHtml(time)})</em></p>
+      <p><strong>${who}</strong> <em style="color:#666">(${escapeHtml(timeIso)})</em></p>
       <p>${escapeHtml(m.content).replace(/\n/g, "<br/>")}</p>
       <hr/>
     `;
@@ -79,8 +155,11 @@ export async function createWpDraftFromSession(args: {
   site: string;
   startedAt: Date;
   messages: Msg[];
-}) {
+}): Promise<WpPostResponse> {
   const title = toTitle(args.site, args.startedAt);
   const html = toHtml(args.messages);
   return wpCreateDraft(title, html);
 }
+
+// Optional export so API route can detect WP errors reliably if needed
+export { WpError };

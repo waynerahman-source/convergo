@@ -7,13 +7,43 @@ type Msg = {
   createdAt: Date;
 };
 
-function must(name: string) {
+type WpPostResponse = {
+  id: number;
+  link?: string;
+};
+
+class WpError extends Error {
+  public readonly status: number;
+  public readonly bodyText: string;
+
+  constructor(status: number, bodyText: string, message?: string) {
+    super(message ?? `WP error ${status}`);
+    this.name = "WpError";
+    this.status = status;
+    this.bodyText = bodyText;
+  }
+}
+
+function mustEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`${name} is missing`);
   return v;
 }
 
-function escapeHtml(s: string) {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeBaseUrl(url: string): string {
+  return url.replace(/\/$/, "");
+}
+
+function encodeBasicAuth(username: string, appPassword: string): string {
+  const cleanedPassword = appPassword.replace(/\s+/g, "");
+  return Buffer.from(`${username}:${cleanedPassword}`).toString("base64");
+}
+
+function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -22,49 +52,126 @@ function escapeHtml(s: string) {
     .replace(/'/g, "&#039;");
 }
 
-function buildTranscript(messages: Msg[]) {
-  return messages
-    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
-    .join("\n\n");
+function buildTranscript(messages: Msg[]): string {
+  return messages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
 }
 
-async function wpCreateDraft(title: string, contentHtml: string) {
-  const base = must("WP_BASE_URL").replace(/\/$/, "");
-  const username = must("WP_USERNAME");
-  const appPassword = must("WP_APP_PASSWORD");
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
 
-  const auth = Buffer.from(`${username}:${appPassword}`).toString("base64");
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(t);
+  }
+}
 
-  const r = await fetch(`${base}/wp-json/wp/v2/posts`, {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${auth}`,
-      "Content-Type": "application/json",
+async function wpCreateDraft(title: string, contentHtml: string): Promise<WpPostResponse> {
+  const base = normalizeBaseUrl(mustEnv("WP_BASE_URL"));
+  const username = mustEnv("WP_USERNAME");
+  const appPassword = mustEnv("WP_APP_PASSWORD");
+
+  const auth = encodeBasicAuth(username, appPassword);
+  const url = `${base}/wp-json/wp/v2/posts`;
+
+  const timeoutMs = Number(process.env.WP_TIMEOUT_MS ?? "15000");
+  const r = await fetchWithTimeout(
+    url,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Basic ${auth}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+      },
+      body: JSON.stringify({
+        title,
+        content: contentHtml,
+        status: "draft",
+      }),
     },
-    body: JSON.stringify({
-      title,
-      content: contentHtml,
-      status: "draft",
-    }),
-  });
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000
+  );
 
   const text = await r.text();
-  if (!r.ok) throw new Error(`WP error ${r.status}: ${text}`);
 
-  const data = JSON.parse(text) as { id: number; link?: string };
-  return data;
+  if (!r.ok) {
+    throw new WpError(r.status, text, `WP error ${r.status}: ${text}`);
+  }
+
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    throw new Error(`WP returned non-JSON response (status ${r.status}): ${text.slice(0, 500)}`);
+  }
+
+  if (!isRecord(data) || typeof data["id"] !== "number") {
+    throw new Error(`WP response missing expected fields: ${text.slice(0, 500)}`);
+  }
+
+  return { id: data["id"], link: typeof data["link"] === "string" ? data["link"] : undefined };
 }
 
-export async function createWpArticleDraftFromSession(args: {
-  site: string;
-  startedAt: Date;
-  messages: Msg[];
-}) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY is missing");
+type ArticleDraft = {
+  title: string;
+  body_html: string;
+  excerpt: string;
+};
 
-  const transcript = buildTranscript(args.messages);
+function extractLikelyJson(text: string): string {
+  // Try to pull the first JSON object out of the model output.
+  // Works even if the model accidentally adds prose.
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start >= 0 && end > start) return text.slice(start, end + 1);
+  return text;
+}
 
+function parseArticleDraftOrFallback(rawModelContent: string, site: string): ArticleDraft {
+  const trimmed = rawModelContent.trim();
+  const candidate = extractLikelyJson(trimmed);
+
+  try {
+    const parsed: unknown = JSON.parse(candidate);
+
+    if (
+      isRecord(parsed) &&
+      typeof parsed["title"] === "string" &&
+      typeof parsed["body_html"] === "string" &&
+      typeof parsed["excerpt"] === "string"
+    ) {
+      return {
+        title: parsed["title"],
+        body_html: parsed["body_html"],
+        excerpt: parsed["excerpt"],
+      };
+    }
+
+    // Parsed JSON but wrong shape
+    throw new Error("JSON shape mismatch");
+  } catch {
+    // Fail-soft: publish raw content safely
+    const safe = escapeHtml(trimmed).replace(/\n/g, "<br/>");
+    return {
+      title: `ConVergo Article Draft — ${site}`,
+      body_html: `<p><em>AI returned invalid JSON. Raw output below:</em></p><p>${safe}</p>`,
+      excerpt: "Draft generated by ConVergo (needs review).",
+    };
+  }
+}
+
+function buildPrompt(transcript: string) {
   const system = `
 You convert a human+AI session transcript into a WordPress draft article.
 Output MUST be valid JSON only (no markdown fences, no extra text).
@@ -86,47 +193,80 @@ Session transcript:
 ${transcript}
 `.trim();
 
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+  return { system, user };
+}
+
+async function callOpenAiToDraftJson(transcript: string): Promise<string> {
+  const apiKey = mustEnv("OPENAI_API_KEY");
+  const model = (process.env.OPENAI_MODEL ?? "gpt-5.2").trim() || "gpt-5.2";
+  const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS ?? "20000");
+
+  const { system, user } = buildPrompt(transcript);
+
+  const r = await fetchWithTimeout(
+    "https://api.openai.com/v1/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+      }),
     },
-    body: JSON.stringify({
-      model: "gpt-5.2",
-      messages: [
-        { role: "system", content: system },
-        { role: "user", content: user },
-      ],
-    }),
-  });
+    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 20000
+  );
 
   const rawText = await r.text();
   if (!r.ok) throw new Error(`OpenAI error ${r.status}: ${rawText}`);
 
-  const data = JSON.parse(rawText) as any;
-  const content = data?.choices?.[0]?.message?.content?.trim() ?? "";
-
-  let parsed: { title: string; body_html: string; excerpt: string };
+  let data: unknown;
   try {
-    parsed = JSON.parse(content);
+    data = JSON.parse(rawText);
   } catch {
-    // fail-soft: wrap the raw model output so we still get something into WP
-    const safe = escapeHtml(content).replace(/\n/g, "<br/>");
-    parsed = {
-      title: `ConVergo Article Draft — ${args.site}`,
-      body_html: `<p><em>AI returned non-JSON output. Raw:</em></p><p>${safe}</p>`,
-      excerpt: "Draft generated by ConVergo (needs review).",
-    };
+    throw new Error(`OpenAI returned non-JSON response: ${rawText.slice(0, 500)}`);
   }
+
+  // Expect: { choices: [ { message: { content: "..." } } ] }
+  if (!isRecord(data)) throw new Error("OpenAI response invalid (not an object)");
+  const choices = data["choices"];
+  if (!Array.isArray(choices) || choices.length === 0) throw new Error("OpenAI response missing choices");
+
+  const first = choices[0];
+  if (!isRecord(first)) throw new Error("OpenAI response invalid (choice not object)");
+  const message = first["message"];
+  if (!isRecord(message)) throw new Error("OpenAI response invalid (message not object)");
+
+  const content = message["content"];
+  if (typeof content !== "string") throw new Error("OpenAI response missing message.content");
+
+  return content.trim();
+}
+
+export async function createWpArticleDraftFromSession(args: {
+  site: string;
+  startedAt: Date;
+  messages: Msg[];
+}): Promise<WpPostResponse> {
+  const transcript = buildTranscript(args.messages);
+
+  const modelContent = await callOpenAiToDraftJson(transcript);
+
+  const parsed = parseArticleDraftOrFallback(modelContent, args.site);
 
   const title = (parsed.title || `ConVergo Article Draft — ${args.site}`).trim();
   const bodyHtml = (parsed.body_html || "").trim();
   const excerpt = (parsed.excerpt || "").trim();
 
-  // Put excerpt at top as a subtle lead (WP can ignore excerpt unless theme uses it)
-  const finalHtml =
-    (excerpt ? `<p><em>${escapeHtml(excerpt)}</em></p>` : "") + bodyHtml;
+  // Put excerpt at top as a subtle lead
+  const finalHtml = (excerpt ? `<p><em>${escapeHtml(excerpt)}</em></p>` : "") + bodyHtml;
 
   return wpCreateDraft(title, finalHtml);
 }
+
+export { WpError };
