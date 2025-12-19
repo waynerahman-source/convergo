@@ -1,4 +1,4 @@
-// app/embed/ChatPanel.tsx
+// C:\Users\Usuario\Projects\convergo\app\embed\ChatPanel.tsx
 "use client";
 
 import { useMemo, useRef, useState, useEffect } from "react";
@@ -7,12 +7,32 @@ import { useSearchParams } from "next/navigation";
 type UiMsg = { id?: string; who: "author" | "ai"; text: string };
 
 type MessagesApiResponse = {
+  ok?: boolean;
   site?: string;
   conversationId?: string;
   messages?: Array<{ id: string; role: "user" | "assistant" | string; content: string }>;
 };
 
 type ChatApiResponse = { reply?: string; detail?: string; error?: string };
+
+type SessionStartResponse = {
+  ok: boolean;
+  site: string;
+  conversationId: string;
+  sessionId: string;
+  startedAt: string;
+};
+
+type SessionEndResponse = {
+  ok: boolean;
+  site: string;
+  sessionId: string;
+  startedAt: string;
+  endedAt: string;
+  messageCount: number;
+  wpPostId?: number;
+  wpLink?: string | null;
+};
 
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
@@ -24,7 +44,6 @@ async function readJsonOrThrow<T>(res: Response): Promise<T> {
   const text = await res.text(); // read once
 
   if (!res.ok) {
-    // Include body snippet when server sends HTML or plain text
     const snippet = text ? text.slice(0, 400) : "(empty body)";
     throw new Error(`HTTP ${res.status} ${res.statusText}: ${snippet}`);
   }
@@ -57,13 +76,17 @@ export default function ChatPanel() {
   const [busy, setBusy] = useState<boolean>(false);
   const [loadingHistory, setLoadingHistory] = useState<boolean>(true);
 
+  // ✅ session state
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [ending, setEnding] = useState<boolean>(false);
+
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const el = scrollerRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [msgs, busy, loadingHistory]);
+  }, [msgs, busy, loadingHistory, ending]);
 
   // Load history on mount / site change
   useEffect(() => {
@@ -71,6 +94,8 @@ export default function ChatPanel() {
 
     async function load() {
       setLoadingHistory(true);
+      setSessionId(null); // reset session when site changes
+
       try {
         const res = await fetch(`/api/messages?site=${encodeURIComponent(site)}`, {
           cache: "no-store",
@@ -86,20 +111,11 @@ export default function ChatPanel() {
           })) ?? [];
 
         if (!cancelled) {
-          setMsgs(
-            loaded.length
-              ? loaded
-              : [{ who: "ai", text: "I’m here. Say hello and we’ll start." }]
-          );
+          setMsgs(loaded.length ? loaded : [{ who: "ai", text: "I’m here. Say hello and we’ll start." }]);
         }
       } catch (err: unknown) {
         if (!cancelled) {
-          setMsgs([
-            {
-              who: "ai",
-              text: `⚠️ Failed to load history: ${errorMessage(err)}`,
-            },
-          ]);
+          setMsgs([{ who: "ai", text: `⚠️ Failed to load history: ${errorMessage(err)}` }]);
         }
       } finally {
         if (!cancelled) setLoadingHistory(false);
@@ -112,9 +128,56 @@ export default function ChatPanel() {
     };
   }, [site]);
 
+  // ✅ SOE: start session (called automatically on first send)
+  async function ensureSession(): Promise<string> {
+    if (sessionId) return sessionId;
+
+    const res = await fetch("/api/session/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ site }),
+    });
+
+    const parsed = await readJsonOrThrow<SessionStartResponse>(res);
+    setSessionId(parsed.sessionId);
+    return parsed.sessionId;
+  }
+
+  // ✅ EOS: end session and create WP draft
+  async function endSession(): Promise<void> {
+    if (!sessionId || busy || ending) return;
+
+    setEnding(true);
+    try {
+      const res = await fetch("/api/session/end", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ site, sessionId, mode: "article" }),
+      });
+
+      const parsed = await readJsonOrThrow<SessionEndResponse>(res);
+
+      const linkText = parsed.wpLink ? `Draft created: ${parsed.wpLink}` : `Draft created (postId ${parsed.wpPostId ?? "?"})`;
+
+      setMsgs((prev) => [
+        ...prev,
+        {
+          who: "ai",
+          text: `✅ Session ended. ${linkText}`,
+        },
+      ]);
+
+      setSessionId(null);
+    } catch (err: unknown) {
+      setMsgs((prev) => [...prev, { who: "ai", text: `⚠️ End session failed: ${errorMessage(err)}` }]);
+    } finally {
+      setEnding(false);
+    }
+  }
+
   async function send(): Promise<void> {
     const text = input.trim();
-    if (!text || busy) return;
+    if (!text || busy || ending) return;
 
     setInput("");
     setBusy(true);
@@ -123,20 +186,21 @@ export default function ChatPanel() {
     setMsgs((prev) => [...prev, { who: "author", text }]);
 
     try {
+      // ✅ ensure session started
+      const sid = await ensureSession();
+
+      // ✅ call chat with sessionId so BOTH user + assistant messages are in the session
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ site, message: text }),
+        body: JSON.stringify({ site, sessionId: sid, message: text }),
       });
 
       const parsed = await readJsonOrThrow<ChatApiResponse>(res);
 
       setMsgs((prev) => [...prev, { who: "ai", text: parsed.reply ?? "…" }]);
     } catch (err: unknown) {
-      setMsgs((prev) => [
-        ...prev,
-        { who: "ai", text: `⚠️ ${errorMessage(err)}` },
-      ]);
+      setMsgs((prev) => [...prev, { who: "ai", text: `⚠️ ${errorMessage(err)}` }]);
     } finally {
       setBusy(false);
     }
@@ -162,6 +226,12 @@ export default function ChatPanel() {
           </div>
         )}
 
+        {sessionId && (
+          <div style={{ fontSize: 12, opacity: 0.75, padding: "6px 4px" }}>
+            Session active • <code>{sessionId}</code>
+          </div>
+        )}
+
         {msgs.map((m, i) => (
           <div
             key={m.id ?? i}
@@ -177,10 +247,7 @@ export default function ChatPanel() {
                 padding: "10px 12px",
                 borderRadius: 14,
                 whiteSpace: "pre-wrap",
-                background:
-                  m.who === "author"
-                    ? "rgba(107,15,46,.10)"
-                    : "rgba(15,23,42,.06)",
+                background: m.who === "author" ? "rgba(107,15,46,.10)" : "rgba(15,23,42,.06)",
                 border: "1px solid rgba(15,23,42,.10)",
               }}
             >
@@ -192,9 +259,9 @@ export default function ChatPanel() {
           </div>
         ))}
 
-        {busy && (
+        {(busy || ending) && (
           <div style={{ fontSize: 12, opacity: 0.6, padding: "6px 4px" }}>
-            AI is typing…
+            {ending ? "Ending session & creating WP draft…" : "AI is typing…"}
           </div>
         )}
       </div>
@@ -215,21 +282,40 @@ export default function ChatPanel() {
             outline: "none",
           }}
         />
+
         <button
           onClick={() => void send()}
-          disabled={busy}
+          disabled={busy || ending}
           style={{
             borderRadius: 999,
             border: 0,
             padding: "12px 16px",
             fontWeight: 700,
-            cursor: busy ? "not-allowed" : "pointer",
+            cursor: busy || ending ? "not-allowed" : "pointer",
             background: "#6b0f2e",
             color: "white",
-            opacity: busy ? 0.6 : 1,
+            opacity: busy || ending ? 0.6 : 1,
           }}
         >
           {busy ? "…" : "Send"}
+        </button>
+
+        <button
+          onClick={() => void endSession()}
+          disabled={!sessionId || busy || ending}
+          title={!sessionId ? "Start chatting to begin a session" : "End session and create WP draft"}
+          style={{
+            borderRadius: 999,
+            border: "1px solid rgba(15,23,42,.18)",
+            padding: "12px 14px",
+            fontWeight: 700,
+            cursor: !sessionId || busy || ending ? "not-allowed" : "pointer",
+            background: "white",
+            color: "#0f172a",
+            opacity: !sessionId || busy || ending ? 0.6 : 1,
+          }}
+        >
+          End
         </button>
       </div>
     </div>

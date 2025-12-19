@@ -6,6 +6,7 @@ export const revalidate = 0;
 
 type Incoming = {
   site?: string;
+  sessionId?: string;
   message?: string;
 };
 
@@ -59,13 +60,14 @@ async function saveMessage(
   origin: string,
   site: string,
   role: "user" | "assistant",
-  content: string
+  content: string,
+  sessionId?: string
 ) {
   try {
     await fetch(`${origin}/api/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ site, role, content }),
+      body: JSON.stringify({ site, role, content, sessionId }),
       cache: "no-store",
     });
   } catch {
@@ -79,26 +81,28 @@ export async function POST(req: Request) {
 
     const body = (await req.json()) as Incoming;
     const site = (body.site ?? "default").trim();
+    const sessionId = body.sessionId ? String(body.sessionId).trim() : "";
     const userText = (body.message ?? "").trim();
     if (!userText) return badRequest("Missing message");
 
     // Persist USER message (fail-soft)
-    await saveMessage(origin, site, "user", sanitizeText(userText));
+    await saveMessage(origin, site, "user", sanitizeText(userText), sessionId || undefined);
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       const reply = "Message saved. Set OPENAI_API_KEY to enable AI replies.";
-      await saveMessage(origin, site, "assistant", reply);
+      await saveMessage(origin, site, "assistant", reply, sessionId || undefined);
       return NextResponse.json({ reply });
     }
 
     // Load history (fail-soft)
     let historyData: any = { messages: [] };
     try {
-      const historyRes = await fetch(
-        `${origin}/api/messages?site=${encodeURIComponent(site)}`,
-        { cache: "no-store" }
-      );
+      const url =
+        `${origin}/api/messages?site=${encodeURIComponent(site)}` +
+        (sessionId ? `&sessionId=${encodeURIComponent(sessionId)}` : "");
+
+      const historyRes = await fetch(url, { cache: "no-store" });
       if (historyRes.ok) {
         historyData = await historyRes.json();
       }
@@ -134,7 +138,7 @@ export async function POST(req: Request) {
     if (!r.ok) {
       const detail = await r.text().catch(() => "");
       const reply = sanitizeText(`OpenAI error: ${detail}`);
-      await saveMessage(origin, site, "assistant", reply);
+      await saveMessage(origin, site, "assistant", reply, sessionId || undefined);
       return NextResponse.json({ reply });
     }
 
@@ -145,7 +149,7 @@ export async function POST(req: Request) {
     const reply = sanitizeText(rawReply);
 
     // Persist ASSISTANT reply (fail-soft)
-    await saveMessage(origin, site, "assistant", reply);
+    await saveMessage(origin, site, "assistant", reply, sessionId || undefined);
 
     return NextResponse.json({ reply });
   } catch (err) {

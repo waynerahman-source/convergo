@@ -5,108 +5,136 @@ import { prisma } from "../../../lib/prisma";
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-type Role = "user" | "assistant";
+type ApiMsg = {
+  id: string;
+  role: string;
+  content: string;
+  createdAt: Date;
+};
 
-function toRole(role: string): Role {
-  return role === "assistant" ? "assistant" : "user";
-}
-
-function okEmpty(site: string, warning: string) {
-  // Return 200 so clients can render gracefully (no modal errors)
-  return NextResponse.json({
-    ok: false,
-    site,
-    conversationId: null,
-    messages: [],
-    warning,
-  });
-}
+type PostBody = {
+  site?: string;
+  sessionId?: string;
+  role?: "user" | "assistant" | string;
+  content?: string;
+};
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const site = (searchParams.get("site") ?? "default").trim();
+  const sessionId = (searchParams.get("sessionId") ?? "").trim();
 
-  try {
-    const convo = await prisma.conversation.upsert({
-      where: { site },
-      update: {},
-      create: { site },
+  const convo = await prisma.conversation.upsert({
+    where: { site },
+    update: {},
+    create: { site },
+  });
+
+  // If sessionId provided, validate it belongs to this conversation
+  let sessionFilter: { sessionId?: string } = {};
+  if (sessionId) {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { id: true, conversationId: true },
     });
 
-    const rows = await prisma.message.findMany({
-      where: { conversationId: convo.id },
-      orderBy: { createdAt: "asc" },
-      take: 200,
-      select: { id: true, role: true, content: true, createdAt: true },
-    });
+    if (!session || session.conversationId !== convo.id) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid sessionId for this site" },
+        { status: 400 }
+      );
+    }
 
-    return NextResponse.json({
-      ok: true,
-      site,
-      conversationId: convo.id,
-      messages: rows.map((m) => ({
-        id: m.id,
-        role: toRole(m.role),
-        content: m.content,
-        createdAt: m.createdAt,
-      })),
-    });
-  } catch (err) {
-    return okEmpty(site, `DB unavailable: ${String(err)}`);
+    sessionFilter = { sessionId: session.id };
   }
+
+  const messages: ApiMsg[] = await prisma.message.findMany({
+    where: { conversationId: convo.id, ...sessionFilter },
+    orderBy: { createdAt: "asc" },
+    take: 200,
+    select: {
+      id: true,
+      role: true,
+      content: true,
+      createdAt: true,
+    },
+  });
+
+  return NextResponse.json({
+    ok: true,
+    site,
+    conversationId: convo.id,
+    sessionId: sessionId || null,
+    messages: messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      createdAt: m.createdAt,
+    })),
+  });
 }
 
 export async function POST(req: Request) {
-  let body: any;
-  try {
-    body = await req.json();
-  } catch {
-    return NextResponse.json({ ok: false, error: "Invalid JSON body." }, { status: 200 });
-  }
+  const body = (await req.json().catch(() => ({}))) as PostBody;
 
-  const site = String(body?.site ?? "default").trim();
-  const roleRaw = String(body?.role ?? "").trim();
-  const content = String(body?.content ?? "").trim();
+  const site = (body.site ?? "default").trim();
+  const content = (body.content ?? "").toString().trim();
+  const roleRaw = (body.role ?? "user").toString().trim();
+  const role = roleRaw === "assistant" ? "assistant" : "user"; // normalize
+  const sessionId = body.sessionId ? String(body.sessionId).trim() : "";
 
-  // Always respond 200 (fail-soft)
-  if (!site) {
-    return NextResponse.json({ ok: false, error: "site is required." }, { status: 200 });
-  }
-  if (roleRaw !== "user" && roleRaw !== "assistant") {
-    return NextResponse.json({ ok: false, error: 'role must be "user" or "assistant".' }, { status: 200 });
-  }
   if (!content) {
-    return NextResponse.json({ ok: false, error: "content is required." }, { status: 200 });
-  }
-  if (content.length > 20000) {
-    return NextResponse.json({ ok: false, error: "content too long (max 20000 chars)." }, { status: 200 });
+    return NextResponse.json({ ok: false, error: "Missing content" }, { status: 400 });
   }
 
-  try {
-    const convo = await prisma.conversation.upsert({
-      where: { site },
-      update: {},
-      create: { site },
+  // ensure conversation exists
+  const convo = await prisma.conversation.upsert({
+    where: { site },
+    update: {},
+    create: { site },
+  });
+
+  // if sessionId provided, verify it belongs to this conversation
+  let sessionIdToUse: string | undefined = undefined;
+
+  if (sessionId) {
+    const session = await prisma.session.findUnique({
+      where: { id: sessionId },
+      select: { id: true, conversationId: true, endedAt: true },
     });
 
-    const msg = await prisma.message.create({
-      data: { conversationId: convo.id, role: roleRaw, content },
-      select: { id: true, role: true, content: true, createdAt: true },
-    });
+    if (!session || session.conversationId !== convo.id) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid sessionId for this site" },
+        { status: 400 }
+      );
+    }
 
-    return NextResponse.json({
-      ok: true,
-      site,
+    // MVP rule: don’t allow writing into a closed session
+    if (session.endedAt) {
+      return NextResponse.json(
+        { ok: false, error: "Session already ended" },
+        { status: 400 }
+      );
+    }
+
+    sessionIdToUse = session.id;
+  }
+
+  const message = await prisma.message.create({
+    data: {
       conversationId: convo.id,
-      message: {
-        id: msg.id,
-        role: toRole(msg.role),
-        content: msg.content,
-        createdAt: msg.createdAt,
-      },
-    });
-  } catch (err) {
-    // DB not writable/available in prod: do not break client
-    return NextResponse.json({ ok: false, warning: `DB unavailable: ${String(err)}` }, { status: 200 });
-  }
+      sessionId: sessionIdToUse,
+      role,
+      content,
+    },
+    select: { id: true, role: true, content: true, createdAt: true },
+  });
+
+  return NextResponse.json({
+    ok: true,
+    site,
+    conversationId: convo.id,
+    message,
+  });
 }
