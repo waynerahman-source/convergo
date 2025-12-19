@@ -41,7 +41,7 @@ function errorMessage(err: unknown): string {
 
 async function readJsonOrThrow<T>(res: Response): Promise<T> {
   const contentType = res.headers.get("content-type") || "";
-  const text = await res.text(); // read once
+  const text = await res.text();
 
   if (!res.ok) {
     const snippet = text ? text.slice(0, 400) : "(empty body)";
@@ -71,19 +71,21 @@ export default function ChatPanel() {
   const site = useMemo(() => sp.get("site") || "default", [sp]);
   const author = useMemo(() => sp.get("author") || "the author", [sp]);
 
+  // Debug toggle: add &debug=1 to show sessionId
+  const debug = useMemo(() => sp.get("debug") === "1", [sp]);
+
   const [input, setInput] = useState<string>("");
   const [msgs, setMsgs] = useState<UiMsg[]>([]);
   const [busy, setBusy] = useState<boolean>(false);
   const [loadingHistory, setLoadingHistory] = useState<boolean>(true);
 
-  // Session state
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [ending, setEnding] = useState<boolean>(false);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
   const DEFAULT_GREETING: UiMsg = useMemo(
-    () => ({ who: "ai", text: "Ready when you are! Say hello and we’ll start." }),
+    () => ({ who: "ai", text: "Ready when you are!" }),
     []
   );
 
@@ -93,13 +95,12 @@ export default function ChatPanel() {
     el.scrollTop = el.scrollHeight;
   }, [msgs, busy, loadingHistory, ending]);
 
-  // Load history on mount / site change
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
       setLoadingHistory(true);
-      setSessionId(null); // reset session when site changes
+      setSessionId(null);
 
       try {
         const res = await fetch(`/api/messages?site=${encodeURIComponent(site)}`, {
@@ -108,8 +109,6 @@ export default function ChatPanel() {
 
         const parsed = await readJsonOrThrow<MessagesApiResponse>(res);
 
-        // IMPORTANT: ensure 'who' is typed as the UiMsg union ("author" | "ai"),
-        // not a generic string. This prevents the build error you hit.
         const loaded: UiMsg[] =
           parsed.messages?.map((m) => ({
             id: m.id,
@@ -135,7 +134,6 @@ export default function ChatPanel() {
     };
   }, [site, DEFAULT_GREETING]);
 
-  // Start session (called automatically on first send)
   async function ensureSession(): Promise<string> {
     if (sessionId) return sessionId;
 
@@ -150,7 +148,6 @@ export default function ChatPanel() {
     return parsed.sessionId;
   }
 
-  // End session and create WP draft
   async function endSession(): Promise<void> {
     if (!sessionId || busy || ending) return;
 
@@ -184,7 +181,6 @@ export default function ChatPanel() {
     }
   }
 
-  // Author-safe: clears ONLY the UI, does NOT touch DB, does NOT call API.
   function clearModal(): void {
     if (busy || ending) return;
     setInput("");
@@ -199,14 +195,11 @@ export default function ChatPanel() {
     setInput("");
     setBusy(true);
 
-    // Optimistic user message
     setMsgs((prev) => [...prev, { who: "author", text }]);
 
     try {
-      // Ensure session started
       const sid = await ensureSession();
 
-      // Call chat with sessionId so BOTH user + assistant messages are in the session
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -245,7 +238,13 @@ export default function ChatPanel() {
 
         {sessionId && (
           <div style={{ fontSize: 12, opacity: 0.75, padding: "6px 4px" }}>
-            Session active • <code>{sessionId}</code>
+            Session active
+            {debug && (
+              <>
+                {" "}
+                • <code>{sessionId}</code>
+              </>
+            )}
           </div>
         )}
 
