@@ -56,27 +56,44 @@ function buildTranscript(messages: Msg[]): string {
   return messages.map((m) => `${m.role.toUpperCase()}: ${m.content}`).join("\n\n");
 }
 
-async function fetchWithTimeout(
+type FetchResult = {
+  res: Response;
+  ms: number;
+  text: string;
+};
+
+async function fetchTextWithTimeout(
   input: string,
   init: RequestInit,
   timeoutMs: number
-): Promise<Response> {
+): Promise<FetchResult> {
   const controller = new AbortController();
   const t = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
 
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    const res = await fetch(input, { ...init, signal: controller.signal });
+    const text = await res.text();
+    return { res, text, ms: Date.now() - t0 };
   } catch (err) {
+    const ms = Date.now() - t0;
     if (err instanceof Error && err.name === "AbortError") {
       throw new Error(`Request timed out after ${timeoutMs}ms`);
     }
-    throw err;
+    // Preserve original error but include elapsed ms for debugging
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Network error after ${ms}ms: ${msg}`);
   } finally {
     clearTimeout(t);
   }
 }
 
-async function wpCreateDraft(title: string, contentHtml: string): Promise<WpPostResponse> {
+function isRetryableWpStatus(status: number): boolean {
+  // Retry on transient WP/infrastructure failures only
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function wpCreateDraft(title: string, contentHtml: string, requestId?: string): Promise<WpPostResponse> {
   const base = normalizeBaseUrl(mustEnv("WP_BASE_URL"));
   const username = mustEnv("WP_USERNAME");
   const appPassword = mustEnv("WP_APP_PASSWORD");
@@ -85,42 +102,76 @@ async function wpCreateDraft(title: string, contentHtml: string): Promise<WpPost
   const url = `${base}/wp-json/wp/v2/posts`;
 
   const timeoutMs = Number(process.env.WP_TIMEOUT_MS ?? "15000");
-  const r = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
+  const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000;
+
+  const payload = JSON.stringify({
+    title,
+    content: contentHtml,
+    status: "draft",
+  });
+
+  const attempt = async (attemptNo: number) => {
+    const { res, text, ms } = await fetchTextWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: payload,
       },
-      body: JSON.stringify({
-        title,
-        content: contentHtml,
-        status: "draft",
-      }),
-    },
-    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000
-  );
+      effectiveTimeout
+    );
 
-  const text = await r.text();
+    const head = text.slice(0, 250);
 
-  if (!r.ok) {
-    throw new WpError(r.status, text, `WP error ${r.status}: ${text}`);
-  }
+    if (!res.ok) {
+      // Log server-side details for debugging, but throw typed error up the chain.
+      console.error(`[wp:createDraft][${requestId ?? "n/a"}] WP not ok`, {
+        attempt: attemptNo,
+        status: res.status,
+        ms,
+        bodyHead: head,
+      });
+      throw new WpError(res.status, text, `WP error ${res.status}: ${head}`);
+    }
 
-  let data: unknown;
+    let data: unknown;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`WP returned non-JSON response (status ${res.status}): ${head}`);
+    }
+
+    if (!isRecord(data) || typeof data["id"] !== "number") {
+      throw new Error(`WP response missing expected fields: ${head}`);
+    }
+
+    console.info(`[wp:createDraft][${requestId ?? "n/a"}] ok`, {
+      attempt: attemptNo,
+      status: res.status,
+      ms,
+      wpPostId: data["id"],
+    });
+
+    return { id: data["id"], link: typeof data["link"] === "string" ? data["link"] : undefined };
+  };
+
+  // One retry only, and only if retryable
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`WP returned non-JSON response (status ${r.status}): ${text.slice(0, 500)}`);
+    return await attempt(1);
+  } catch (err) {
+    if (err instanceof WpError && isRetryableWpStatus(err.status)) {
+      console.warn(`[wp:createDraft][${requestId ?? "n/a"}] retrying once`, {
+        status: err.status,
+        bodyHead: err.bodyText.slice(0, 200),
+      });
+      return await attempt(2);
+    }
+    throw err;
   }
-
-  if (!isRecord(data) || typeof data["id"] !== "number") {
-    throw new Error(`WP response missing expected fields: ${text.slice(0, 500)}`);
-  }
-
-  return { id: data["id"], link: typeof data["link"] === "string" ? data["link"] : undefined };
 }
 
 type ArticleDraft = {
@@ -130,8 +181,6 @@ type ArticleDraft = {
 };
 
 function extractLikelyJson(text: string): string {
-  // Try to pull the first JSON object out of the model output.
-  // Works even if the model accidentally adds prose.
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start >= 0 && end > start) return text.slice(start, end + 1);
@@ -158,10 +207,8 @@ function parseArticleDraftOrFallback(rawModelContent: string, site: string): Art
       };
     }
 
-    // Parsed JSON but wrong shape
     throw new Error("JSON shape mismatch");
   } catch {
-    // Fail-soft: publish raw content safely
     const safe = escapeHtml(trimmed).replace(/\n/g, "<br/>");
     return {
       title: `ConVergo Article Draft — ${site}`,
@@ -196,14 +243,17 @@ ${transcript}
   return { system, user };
 }
 
-async function callOpenAiToDraftJson(transcript: string): Promise<string> {
+async function callOpenAiToDraftJson(transcript: string, requestId?: string): Promise<string> {
   const apiKey = mustEnv("OPENAI_API_KEY");
   const model = (process.env.OPENAI_MODEL ?? "gpt-5.2").trim() || "gpt-5.2";
+
   const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS ?? "20000");
+  const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 20000;
 
   const { system, user } = buildPrompt(transcript);
 
-  const r = await fetchWithTimeout(
+  const t0 = Date.now();
+  const { res, text, ms } = await fetchTextWithTimeout(
     "https://api.openai.com/v1/chat/completions",
     {
       method: "POST",
@@ -219,20 +269,25 @@ async function callOpenAiToDraftJson(transcript: string): Promise<string> {
         ],
       }),
     },
-    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 20000
+    effectiveTimeout
   );
 
-  const rawText = await r.text();
-  if (!r.ok) throw new Error(`OpenAI error ${r.status}: ${rawText}`);
+  if (!res.ok) {
+    console.error(`[openai:draftJson][${requestId ?? "n/a"}] not ok`, {
+      status: res.status,
+      ms,
+      bodyHead: text.slice(0, 300),
+    });
+    throw new Error(`OpenAI error ${res.status}: ${text.slice(0, 500)}`);
+  }
 
   let data: unknown;
   try {
-    data = JSON.parse(rawText);
+    data = JSON.parse(text);
   } catch {
-    throw new Error(`OpenAI returned non-JSON response: ${rawText.slice(0, 500)}`);
+    throw new Error(`OpenAI returned non-JSON response: ${text.slice(0, 500)}`);
   }
 
-  // Expect: { choices: [ { message: { content: "..." } } ] }
   if (!isRecord(data)) throw new Error("OpenAI response invalid (not an object)");
   const choices = data["choices"];
   if (!Array.isArray(choices) || choices.length === 0) throw new Error("OpenAI response missing choices");
@@ -245,6 +300,12 @@ async function callOpenAiToDraftJson(transcript: string): Promise<string> {
   const content = message["content"];
   if (typeof content !== "string") throw new Error("OpenAI response missing message.content");
 
+  console.info(`[openai:draftJson][${requestId ?? "n/a"}] ok`, {
+    model,
+    ms: Date.now() - t0,
+    outChars: content.length,
+  });
+
   return content.trim();
 }
 
@@ -252,10 +313,11 @@ export async function createWpArticleDraftFromSession(args: {
   site: string;
   startedAt: Date;
   messages: Msg[];
+  requestId?: string;
 }): Promise<WpPostResponse> {
   const transcript = buildTranscript(args.messages);
 
-  const modelContent = await callOpenAiToDraftJson(transcript);
+  const modelContent = await callOpenAiToDraftJson(transcript, args.requestId);
 
   const parsed = parseArticleDraftOrFallback(modelContent, args.site);
 
@@ -263,10 +325,9 @@ export async function createWpArticleDraftFromSession(args: {
   const bodyHtml = (parsed.body_html || "").trim();
   const excerpt = (parsed.excerpt || "").trim();
 
-  // Put excerpt at top as a subtle lead
   const finalHtml = (excerpt ? `<p><em>${escapeHtml(excerpt)}</em></p>` : "") + bodyHtml;
 
-  return wpCreateDraft(title, finalHtml);
+  return wpCreateDraft(title, finalHtml, args.requestId);
 }
 
 export { WpError };

@@ -1,4 +1,5 @@
 // C:\Users\Usuario\Projects\convergo\lib\engines\wpDraftEngine.ts
+
 type Role = "user" | "assistant";
 
 type Msg = {
@@ -35,85 +36,8 @@ function normalizeBaseUrl(url: string): string {
 }
 
 function encodeBasicAuth(username: string, appPassword: string): string {
-  // WP Application Passwords can be copied with spaces; accept either.
   const cleanedPassword = appPassword.replace(/\s+/g, "");
   return Buffer.from(`${username}:${cleanedPassword}`).toString("base64");
-}
-
-async function fetchWithTimeout(
-  input: string,
-  init: RequestInit,
-  timeoutMs: number
-): Promise<Response> {
-  const controller = new AbortController();
-  const t = setTimeout(() => controller.abort(), timeoutMs);
-
-  try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") {
-      throw new Error(`WP request timed out after ${timeoutMs}ms`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(t);
-  }
-}
-
-// Basic WordPress REST create-post (draft)
-async function wpCreateDraft(title: string, contentHtml: string): Promise<WpPostResponse> {
-  const base = normalizeBaseUrl(mustEnv("WP_BASE_URL"));
-  const username = mustEnv("WP_USERNAME");
-  const appPassword = mustEnv("WP_APP_PASSWORD");
-
-  const auth = encodeBasicAuth(username, appPassword);
-  const url = `${base}/wp-json/wp/v2/posts`;
-
-  const timeoutMs = Number(process.env.WP_TIMEOUT_MS ?? "15000");
-  const r = await fetchWithTimeout(
-    url,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${auth}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      },
-      body: JSON.stringify({
-        title,
-        content: contentHtml,
-        status: "draft",
-      }),
-    },
-    Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000
-  );
-
-  const text = await r.text();
-
-  if (!r.ok) {
-    // Throw a typed error so callers can map 401/403 cleanly.
-    throw new WpError(r.status, text, `WP error ${r.status}: ${text}`);
-  }
-
-  // WP usually returns JSON; but be defensive.
-  let data: unknown;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`WP returned non-JSON response (status ${r.status}): ${text.slice(0, 500)}`);
-  }
-
-  if (
-    typeof data !== "object" ||
-    data === null ||
-    !("id" in data) ||
-    typeof (data as Record<string, unknown>).id !== "number"
-  ) {
-    throw new Error(`WP response missing expected fields: ${text.slice(0, 500)}`);
-  }
-
-  const obj = data as { id: number; link?: string };
-  return { id: obj.id, link: obj.link };
 }
 
 function escapeHtml(s: string): string {
@@ -125,41 +49,157 @@ function escapeHtml(s: string): string {
     .replace(/'/g, "&#039;");
 }
 
-function toTitle(site: string, startedAt: Date): string {
-  const d = startedAt.toISOString().slice(0, 10);
+type FetchResult = {
+  res: Response;
+  ms: number;
+  text: string;
+};
+
+async function fetchTextWithTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<FetchResult> {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  const t0 = Date.now();
+
+  try {
+    const res = await fetch(input, { ...init, signal: controller.signal });
+    const text = await res.text();
+    return { res, text, ms: Date.now() - t0 };
+  } catch (err) {
+    const ms = Date.now() - t0;
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new Error(`Request timed out after ${timeoutMs}ms`);
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Network error after ${ms}ms: ${msg}`);
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function isRetryableWpStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
+async function wpCreateDraft(
+  title: string,
+  contentHtml: string,
+  requestId?: string
+): Promise<WpPostResponse> {
+  const base = normalizeBaseUrl(mustEnv("WP_BASE_URL"));
+  const username = mustEnv("WP_USERNAME");
+  const appPassword = mustEnv("WP_APP_PASSWORD");
+
+  const auth = encodeBasicAuth(username, appPassword);
+  const url = `${base}/wp-json/wp/v2/posts`;
+
+  const timeoutMs = Number(process.env.WP_TIMEOUT_MS ?? "15000");
+  const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 15000;
+
+  const payload = JSON.stringify({
+    title,
+    content: contentHtml,
+    status: "draft",
+  });
+
+  const attempt = async (attemptNo: number) => {
+    const { res, text, ms } = await fetchTextWithTimeout(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: payload,
+      },
+      effectiveTimeout
+    );
+
+    const head = text.slice(0, 250);
+
+    if (!res.ok) {
+      console.error(`[wp:createDraft-basic][${requestId ?? "n/a"}] WP not ok`, {
+        attempt: attemptNo,
+        status: res.status,
+        ms,
+        bodyHead: head,
+      });
+      throw new WpError(res.status, text, `WP error ${res.status}: ${head}`);
+    }
+
+    let data: any;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`WP returned non-JSON response (status ${res.status}): ${head}`);
+    }
+
+    if (!data || typeof data.id !== "number") {
+      throw new Error(`WP response missing expected fields: ${head}`);
+    }
+
+    console.info(`[wp:createDraft-basic][${requestId ?? "n/a"}] ok`, {
+      attempt: attemptNo,
+      status: res.status,
+      ms,
+      wpPostId: data.id,
+    });
+
+    return { id: data.id, link: typeof data.link === "string" ? data.link : undefined };
+  };
+
+  try {
+    return await attempt(1);
+  } catch (err) {
+    if (err instanceof WpError && isRetryableWpStatus(err.status)) {
+      console.warn(`[wp:createDraft-basic][${requestId ?? "n/a"}] retrying once`, {
+        status: err.status,
+        bodyHead: err.bodyText.slice(0, 200),
+      });
+      return await attempt(2);
+    }
+    throw err;
+  }
+}
+
+function buildTitle(site: string, startedAt: Date) {
+  const d = startedAt.toISOString().slice(0, 19).replace("T", " ");
   return `ConVergo Draft — ${site} — ${d}`;
 }
 
-function toHtml(messages: Msg[]): string {
-  // MVP: clean chronological transcript, lightly formatted
-  const blocks = messages.map((m) => {
-    const who = m.role === "user" ? "Human" : "AI";
-    const timeIso = new Date(m.createdAt).toISOString();
+function buildHtml(site: string, startedAt: Date, messages: Msg[]) {
+  const header = `<p><em>Draft generated by ConVergo. Review before publishing.</em></p>`;
+  const meta = `<p><strong>Site:</strong> ${escapeHtml(site)}<br/><strong>Started:</strong> ${escapeHtml(
+    startedAt.toISOString()
+  )}</p>`;
 
-    return `
-      <p><strong>${who}</strong> <em style="color:#666">(${escapeHtml(timeIso)})</em></p>
-      <p>${escapeHtml(m.content).replace(/\n/g, "<br/>")}</p>
-      <hr/>
-    `;
-  });
+  const body = messages
+    .map((m) => {
+      const role = m.role.toUpperCase();
+      const when = m.createdAt.toISOString().slice(0, 19).replace("T", " ");
+      return `<p><strong>${escapeHtml(role)}</strong> <em>${escapeHtml(when)}</em><br/>${escapeHtml(
+        m.content
+      ).replace(/\n/g, "<br/>")}</p>`;
+    })
+    .join("\n");
 
-  return `
-    <div>
-      <p><em>Draft generated by ConVergo. Review before publishing.</em></p>
-      ${blocks.join("\n")}
-    </div>
-  `;
+  return `${header}\n${meta}\n<hr/>\n${body}`;
 }
 
 export async function createWpDraftFromSession(args: {
   site: string;
   startedAt: Date;
   messages: Msg[];
+  requestId?: string;
 }): Promise<WpPostResponse> {
-  const title = toTitle(args.site, args.startedAt);
-  const html = toHtml(args.messages);
-  return wpCreateDraft(title, html);
+  const title = buildTitle(args.site, args.startedAt);
+  const html = buildHtml(args.site, args.startedAt, args.messages);
+  return wpCreateDraft(title, html, args.requestId);
 }
 
-// Optional export so API route can detect WP errors reliably if needed
 export { WpError };

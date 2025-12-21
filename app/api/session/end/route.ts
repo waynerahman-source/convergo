@@ -2,7 +2,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
 import { createWpDraftFromSession } from "../../../../lib/engines/wpDraftEngine";
-import { createWpArticleDraftFromSession } from "../../../../lib/engines/wpArticleEngine";
+import { createWpArticleDraftFromSession, WpError } from "../../../../lib/engines/wpArticleEngine";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -47,8 +47,14 @@ function safeMessage(err: unknown): string {
   }
 }
 
+/**
+ * Extracts meaningful WP status when downstream throws WpError or other shapes.
+ */
 function extractWpAuthStatus(err: unknown): number | null {
   if (!isRecord(err)) return null;
+
+  // Our WpError
+  if (err instanceof WpError && typeof err.status === "number") return err.status;
 
   const status = err["status"];
   const statusCode = err["statusCode"];
@@ -77,10 +83,15 @@ function jsonError(status: number, payload: Omit<ErrorPayload, "ok"> & { ok?: fa
 
 export async function POST(req: Request) {
   const requestId = makeRequestId();
+  const t0 = Date.now();
 
   let site = "default";
   let sessionId = "";
   let mode: "transcript" | "article" = "article";
+
+  // Day-1 stability caps (prevents WP / OpenAI payload blowups)
+  const MAX_MSGS = Number(process.env.END_SESSION_MAX_MSGS ?? "120"); // safe default
+  const MAX_CHARS = Number(process.env.END_SESSION_MAX_CHARS ?? "120000"); // ~120 KB text
 
   try {
     const body = (await req.json().catch(() => ({}))) as Body;
@@ -97,6 +108,8 @@ export async function POST(req: Request) {
         site,
       });
     }
+
+    console.info(`[session:end][${requestId}] start`, { site, sessionId, mode });
 
     const convo = await prisma.conversation.findUnique({ where: { site } });
     if (!convo) {
@@ -124,6 +137,7 @@ export async function POST(req: Request) {
       });
     }
 
+    // Mark endedAt if not already ended (idempotent)
     const now = new Date();
     const ended = await prisma.session.update({
       where: { id: sessionId },
@@ -131,22 +145,23 @@ export async function POST(req: Request) {
       select: { startedAt: true, endedAt: true },
     });
 
+    const tMsgs0 = Date.now();
     const msgs = await prisma.message.findMany({
       where: { conversationId: convo.id, sessionId },
       orderBy: { createdAt: "asc" },
       select: { role: true, content: true, createdAt: true },
     });
-
-    const normalized = msgs.map((m) => {
-      const role = m.role === "assistant" ? "assistant" : "user";
-      return {
-        role,
-        content: m.content,
-        createdAt: m.createdAt,
-      } as const;
+    console.info(`[session:end][${requestId}] fetched messages`, {
+      count: msgs.length,
+      ms: Date.now() - tMsgs0,
     });
 
-    if (normalized.length === 0) {
+    const normalizedAll = msgs.map((m) => {
+      const role = m.role === "assistant" ? "assistant" : "user";
+      return { role, content: m.content, createdAt: m.createdAt } as const;
+    });
+
+    if (normalizedAll.length === 0) {
       return jsonError(400, {
         error: "NO_MESSAGES",
         message: "No messages found for this session",
@@ -156,24 +171,49 @@ export async function POST(req: Request) {
       });
     }
 
+    // Apply caps (last N messages + last N chars)
+    const normalizedWindow = normalizedAll.slice(-Math.max(1, MAX_MSGS));
+
+    // Char cap (walk backwards to keep the most recent content)
+    let totalChars = 0;
+    const normalized: typeof normalizedWindow = [];
+    for (let i = normalizedWindow.length - 1; i >= 0; i--) {
+      const m = normalizedWindow[i];
+      const add = (m.content?.length ?? 0) + 32;
+      if (normalized.length > 0 && totalChars + add > MAX_CHARS) break;
+      normalized.unshift(m);
+      totalChars += add;
+    }
+
+    console.info(`[session:end][${requestId}] normalized`, {
+      originalCount: normalizedAll.length,
+      cappedCount: normalized.length,
+      approxChars: totalChars,
+      mode,
+    });
+
     let wp: { id: number | string; link?: string | null };
 
+    const tWp0 = Date.now();
     try {
       wp =
         mode === "transcript"
           ? await createWpDraftFromSession({
-              site,
-              startedAt: ended.startedAt,
-              messages: normalized,
-            })
+            site,
+            startedAt: ended.startedAt,
+            messages: normalized,
+            requestId,
+         })
           : await createWpArticleDraftFromSession({
               site,
               startedAt: ended.startedAt,
               messages: normalized,
+              requestId, // correlation for logs
             });
     } catch (err) {
       const status = extractWpAuthStatus(err);
 
+      // Keep error messages user-visible but not overly noisy.
       if (status === 401) {
         return jsonError(502, {
           error: "WP_AUTH_FAILED",
@@ -200,7 +240,13 @@ export async function POST(req: Request) {
         site,
         sessionId,
         mode,
+        msInWpStep: Date.now() - tWp0,
+        messageCount: normalized.length,
+        approxChars: totalChars,
+        status,
         message: safeMessage(err),
+        // If it's our WpError, log a short body head for diagnostics.
+        wpBodyHead: err instanceof WpError ? err.bodyText.slice(0, 300) : undefined,
       });
 
       return jsonError(502, {
@@ -217,8 +263,11 @@ export async function POST(req: Request) {
       sessionId,
       mode,
       messageCount: normalized.length,
+      approxChars: totalChars,
       wpPostId: wp.id,
       wpLink: wp.link ?? null,
+      msWpStep: Date.now() - tWp0,
+      msTotal: Date.now() - t0,
     });
 
     return NextResponse.json({
@@ -232,6 +281,7 @@ export async function POST(req: Request) {
       messageCount: normalized.length,
       wpPostId: wp.id,
       wpLink: wp.link ?? null,
+      msTotal: Date.now() - t0,
     });
   } catch (err) {
     console.error(`[session:end][${requestId}] Unhandled error`, {
@@ -239,6 +289,7 @@ export async function POST(req: Request) {
       sessionId,
       mode,
       message: safeMessage(err),
+      msTotal: Date.now() - t0,
     });
 
     return jsonError(500, {
