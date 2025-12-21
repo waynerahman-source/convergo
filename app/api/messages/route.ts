@@ -19,8 +19,19 @@ type PostBody = {
   content?: string;
 };
 
+function makeRequestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function json(ok: boolean, data: Record<string, unknown>, status = 200) {
   return NextResponse.json({ ok, ...data }, { status });
+}
+
+function jsonError(
+  status: number,
+  payload: { requestId: string } & Record<string, unknown>
+) {
+  return NextResponse.json({ ok: false, ...payload }, { status });
 }
 
 function isAuthorRequest(searchParams: URLSearchParams): boolean {
@@ -36,10 +47,21 @@ function isAuthorRequest(searchParams: URLSearchParams): boolean {
   return provided.length > 0 && provided === expected;
 }
 
+function clampSite(raw: string): string {
+  // prevent weirdly long/untrusted input
+  const s = (raw ?? "default").toString().trim() || "default";
+  return s.length > 80 ? s.slice(0, 80) : s;
+}
+
+function normalizeRole(roleRaw: string): "user" | "assistant" {
+  const r = (roleRaw ?? "user").toString().trim();
+  return r === "assistant" ? "assistant" : "user";
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
-  const site = (searchParams.get("site") ?? "default").trim();
+  const site = clampSite(searchParams.get("site") ?? "default");
   const requestedSessionId = (searchParams.get("sessionId") ?? "").trim();
 
   // Ensure conversation exists
@@ -142,16 +164,37 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const requestId = makeRequestId();
+
+  // Limits (server-enforced). Keep these simple + configurable.
+  const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS ?? "4000");
+  const MAX_MESSAGES_PER_SESSION = Number(process.env.MAX_MESSAGES_PER_SESSION ?? "80");
+
   const body = (await req.json().catch(() => ({}))) as PostBody;
 
-  const site = (body.site ?? "default").trim();
+  const site = clampSite(body.site ?? "default");
   const content = (body.content ?? "").toString().trim();
-  const roleRaw = (body.role ?? "user").toString().trim();
-  const role = roleRaw === "assistant" ? "assistant" : "user"; // normalize
+  const role = normalizeRole(body.role ?? "user");
   const sessionId = body.sessionId ? String(body.sessionId).trim() : "";
 
   if (!content) {
-    return json(false, { error: "Missing content" }, 400);
+    return jsonError(400, {
+      requestId,
+      error: "MISSING_CONTENT",
+      message: "Missing content",
+      site,
+    });
+  }
+
+  if (Number.isFinite(MAX_MESSAGE_CHARS) && MAX_MESSAGE_CHARS > 0 && content.length > MAX_MESSAGE_CHARS) {
+    return jsonError(413, {
+      requestId,
+      error: "MESSAGE_TOO_LONG",
+      message: `Message too long (${content.length} chars). Max is ${MAX_MESSAGE_CHARS}. Please shorten or split your text. See /limits.`,
+      site,
+      maxChars: MAX_MESSAGE_CHARS,
+      actualChars: content.length,
+    });
   }
 
   // Ensure conversation exists
@@ -171,12 +214,43 @@ export async function POST(req: Request) {
     });
 
     if (!session || session.conversationId !== convo.id) {
-      return json(false, { error: "Invalid sessionId for this site" }, 400);
+      return jsonError(400, {
+        requestId,
+        error: "INVALID_SESSION",
+        message: "Invalid sessionId for this site",
+        site,
+        sessionId,
+      });
     }
 
     // MVP rule: don’t allow writing into a closed session
     if (session.endedAt) {
-      return json(false, { error: "Session already ended" }, 400);
+      return jsonError(400, {
+        requestId,
+        error: "SESSION_ENDED",
+        message: "Session already ended",
+        site,
+        sessionId,
+      });
+    }
+
+    // Session message count guardrail (prevents runaway DB growth and abuse)
+    if (Number.isFinite(MAX_MESSAGES_PER_SESSION) && MAX_MESSAGES_PER_SESSION > 0) {
+      const count = await prisma.message.count({
+        where: { conversationId: convo.id, sessionId: session.id },
+      });
+
+      if (count >= MAX_MESSAGES_PER_SESSION) {
+        return jsonError(429, {
+          requestId,
+          error: "SESSION_MESSAGE_LIMIT_REACHED",
+          message: `This session has reached the message limit (${MAX_MESSAGES_PER_SESSION}). Please end the session and start a new one. See /limits.`,
+          site,
+          sessionId,
+          maxMessagesPerSession: MAX_MESSAGES_PER_SESSION,
+          currentCount: count,
+        });
+      }
     }
 
     sessionIdToUse = session.id;

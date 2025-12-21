@@ -10,6 +10,7 @@ type MessagesApiResponse = {
   ok?: boolean;
   site?: string;
   conversationId?: string;
+  sessionId?: string | null;
   messages?: Array<{ id: string; role: "user" | "assistant" | string; content: string }>;
 };
 
@@ -39,11 +40,39 @@ function errorMessage(err: unknown): string {
   return String(err);
 }
 
-async function readJsonOrThrow<T>(res: Response): Promise<T> {
+/**
+ * Reads response as text. If status is not ok, tries to extract a friendly JSON error payload:
+ * { ok:false, error:"...", message:"...", requestId:"..." }
+ */
+async function readJsonOrExplain(res: Response): Promise<any> {
   const contentType = res.headers.get("content-type") || "";
   const text = await res.text();
 
+  // Non-OK responses: try to parse JSON for nicer messaging
   if (!res.ok) {
+    let parsed: any = null;
+    if (text && contentType.toLowerCase().includes("application/json")) {
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        parsed = null;
+      }
+    }
+
+    // If server provided structured error payload, present it cleanly
+    if (parsed && typeof parsed === "object") {
+      const msg = typeof parsed.message === "string" ? parsed.message : null;
+      const reqId = typeof parsed.requestId === "string" ? parsed.requestId : null;
+      const errCode = typeof parsed.error === "string" ? parsed.error : null;
+
+      const friendly =
+        msg ??
+        (errCode ? `${errCode}` : `HTTP ${res.status} ${res.statusText}`) +
+          (reqId ? ` (ref ${reqId})` : "");
+
+      throw new Error(`HTTP ${res.status}: ${friendly}`);
+    }
+
     const snippet = text ? text.slice(0, 400) : "(empty body)";
     throw new Error(`HTTP ${res.status} ${res.statusText}: ${snippet}`);
   }
@@ -58,7 +87,7 @@ async function readJsonOrThrow<T>(res: Response): Promise<T> {
   }
 
   try {
-    return JSON.parse(text) as T;
+    return JSON.parse(text);
   } catch {
     const snippet = text.slice(0, 400);
     throw new Error(`Invalid JSON returned by server. Body: ${snippet}`);
@@ -74,6 +103,10 @@ export default function ChatPanel() {
   // Debug toggle: add &debug=1 to show sessionId
   const debug = useMemo(() => sp.get("debug") === "1", [sp]);
 
+  // Limits (client-side guardrail)
+  const MAX_MESSAGE_CHARS = 4000;
+  const LIMITS_URL = "https://convergo.live/usage-limits";
+
   const [input, setInput] = useState<string>("");
   const [msgs, setMsgs] = useState<UiMsg[]>([]);
   const [busy, setBusy] = useState<boolean>(false);
@@ -81,6 +114,9 @@ export default function ChatPanel() {
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [ending, setEnding] = useState<boolean>(false);
+
+  // A small inline warning above the input (not stored as chat message)
+  const [inlineWarning, setInlineWarning] = useState<string | null>(null);
 
   const scrollerRef = useRef<HTMLDivElement | null>(null);
 
@@ -107,7 +143,7 @@ export default function ChatPanel() {
           cache: "no-store",
         });
 
-        const parsed = await readJsonOrThrow<MessagesApiResponse>(res);
+        const parsed = (await readJsonOrExplain(res)) as MessagesApiResponse;
 
         const loaded: UiMsg[] =
           parsed.messages?.map((m) => ({
@@ -143,7 +179,7 @@ export default function ChatPanel() {
       body: JSON.stringify({ site }),
     });
 
-    const parsed = await readJsonOrThrow<SessionStartResponse>(res);
+    const parsed = (await readJsonOrExplain(res)) as SessionStartResponse;
     setSessionId(parsed.sessionId);
     return parsed.sessionId;
   }
@@ -151,7 +187,9 @@ export default function ChatPanel() {
   async function endSession(): Promise<void> {
     if (!sessionId || busy || ending) return;
 
+    setInlineWarning(null);
     setEnding(true);
+
     try {
       const res = await fetch("/api/session/end", {
         method: "POST",
@@ -159,7 +197,7 @@ export default function ChatPanel() {
         body: JSON.stringify({ site, sessionId, mode: "article" }),
       });
 
-      const parsed = await readJsonOrThrow<SessionEndResponse>(res);
+      const parsed = (await readJsonOrExplain(res)) as SessionEndResponse;
 
       const linkText = parsed.wpLink
         ? `Draft created: ${parsed.wpLink}`
@@ -176,6 +214,7 @@ export default function ChatPanel() {
       setSessionId(null);
     } catch (err: unknown) {
       setMsgs((prev) => [...prev, { who: "ai", text: `⚠️ End session failed: ${errorMessage(err)}` }]);
+      setInlineWarning("Tip: If your session is large, split it into smaller parts. See Usage limits.");
     } finally {
       setEnding(false);
     }
@@ -184,6 +223,7 @@ export default function ChatPanel() {
   function clearModal(): void {
     if (busy || ending) return;
     setInput("");
+    setInlineWarning(null);
     setSessionId(null);
     setMsgs([DEFAULT_GREETING]);
   }
@@ -192,25 +232,38 @@ export default function ChatPanel() {
     const text = input.trim();
     if (!text || busy || ending) return;
 
+    // Client-side limit guard
+    if (text.length > MAX_MESSAGE_CHARS) {
+      setInlineWarning(
+        `Message too long (${text.length} chars). Please shorten or split it. Max is ${MAX_MESSAGE_CHARS}.`
+      );
+      return;
+    }
+
+    setInlineWarning(null);
     setInput("");
     setBusy(true);
 
+    // Optimistically show the user's message
     setMsgs((prev) => [...prev, { who: "author", text }]);
 
     try {
       const sid = await ensureSession();
 
+      // OPTIONAL: persist the message via /api/messages too (if your /api/chat doesn't already do it).
+      // We keep your current flow as-is: /api/chat drives the assistant response.
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ site, sessionId: sid, message: text }),
       });
 
-      const parsed = await readJsonOrThrow<ChatApiResponse>(res);
+      const parsed = (await readJsonOrExplain(res)) as ChatApiResponse;
 
       setMsgs((prev) => [...prev, { who: "ai", text: parsed.reply ?? "…" }]);
     } catch (err: unknown) {
       setMsgs((prev) => [...prev, { who: "ai", text: `⚠️ ${errorMessage(err)}` }]);
+      setInlineWarning("If this keeps happening, shorten the text and try again. See Usage limits.");
     } finally {
       setBusy(false);
     }
@@ -282,10 +335,27 @@ export default function ChatPanel() {
         )}
       </div>
 
+      {inlineWarning && (
+        <div style={{ marginTop: 10, fontSize: 12, color: "#6b0f2e" }}>
+          ⚠️ {inlineWarning}{" "}
+          <a
+            href={LIMITS_URL}
+            target="_blank"
+            rel="noreferrer"
+            style={{ color: "#6b0f2e", textDecoration: "underline" }}
+          >
+            Usage limits
+          </a>
+        </div>
+      )}
+
       <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
         <input
           value={input}
-          onChange={(e) => setInput(e.target.value)}
+          onChange={(e) => {
+            setInput(e.target.value);
+            if (inlineWarning) setInlineWarning(null);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter") void send();
           }}
@@ -351,6 +421,18 @@ export default function ChatPanel() {
         >
           Clear
         </button>
+      </div>
+
+      <div style={{ marginTop: 10, fontSize: 12, color: "rgba(15,23,42,.7)" }}>
+        <a
+          href={LIMITS_URL}
+          target="_blank"
+          rel="noreferrer"
+          style={{ color: "rgba(15,23,42,.7)", textDecoration: "underline" }}
+        >
+          Usage limits
+        </a>
+        <span> — please keep messages short for best reliability.</span>
       </div>
     </div>
   );
