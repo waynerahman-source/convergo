@@ -1,4 +1,4 @@
-// C:\Users\Usuario\Projects\convergo\app\api\session\end\route.ts
+// app/api/session/end/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "../../../../lib/prisma";
 import { createWpDraftFromSession } from "../../../../lib/engines/wpDraftEngine";
@@ -53,7 +53,6 @@ function safeMessage(err: unknown): string {
 function extractWpAuthStatus(err: unknown): number | null {
   if (!isRecord(err)) return null;
 
-  // Our WpError
   if (err instanceof WpError && typeof err.status === "number") return err.status;
 
   const status = err["status"];
@@ -122,28 +121,32 @@ export async function POST(req: Request) {
       });
     }
 
+    // Try to load session. IMPORTANT: For MVP1, we do NOT hard-fail if missing.
     const session = await prisma.session.findUnique({
       where: { id: sessionId },
       select: { id: true, startedAt: true, endedAt: true, conversationId: true },
     });
 
-    if (!session || session.conversationId !== convo.id) {
-      return jsonError(404, {
-        error: "SESSION_NOT_FOUND",
-        message: "Session not found for site",
-        requestId,
+    const sessionBelongsToSite = !!session && session.conversationId === convo.id;
+
+    // Mark endedAt if session exists + belongs (idempotent). Otherwise skip.
+    const now = new Date();
+    const startedAtFallback = now;
+
+    const ended = sessionBelongsToSite
+      ? await prisma.session.update({
+          where: { id: sessionId },
+          data: { endedAt: session!.endedAt ?? now },
+          select: { startedAt: true, endedAt: true },
+        })
+      : { startedAt: startedAtFallback, endedAt: now };
+
+    if (!sessionBelongsToSite) {
+      console.warn(`[session:end][${requestId}] session missing or not linked; proceeding fail-soft`, {
         site,
         sessionId,
       });
     }
-
-    // Mark endedAt if not already ended (idempotent)
-    const now = new Date();
-    const ended = await prisma.session.update({
-      where: { id: sessionId },
-      data: { endedAt: session.endedAt ?? now },
-      select: { startedAt: true, endedAt: true },
-    });
 
     const tMsgs0 = Date.now();
     const msgs = await prisma.message.findMany({
@@ -199,21 +202,20 @@ export async function POST(req: Request) {
       wp =
         mode === "transcript"
           ? await createWpDraftFromSession({
-            site,
-            startedAt: ended.startedAt,
-            messages: normalized,
-            requestId,
-         })
+              site,
+              startedAt: ended.startedAt,
+              messages: normalized,
+              requestId,
+            })
           : await createWpArticleDraftFromSession({
               site,
               startedAt: ended.startedAt,
               messages: normalized,
-              requestId, // correlation for logs
+              requestId,
             });
     } catch (err) {
       const status = extractWpAuthStatus(err);
 
-      // Keep error messages user-visible but not overly noisy.
       if (status === 401) {
         return jsonError(502, {
           error: "WP_AUTH_FAILED",
@@ -245,7 +247,6 @@ export async function POST(req: Request) {
         approxChars: totalChars,
         status,
         message: safeMessage(err),
-        // If it's our WpError, log a short body head for diagnostics.
         wpBodyHead: err instanceof WpError ? err.bodyText.slice(0, 300) : undefined,
       });
 
@@ -282,6 +283,7 @@ export async function POST(req: Request) {
       wpPostId: wp.id,
       wpLink: wp.link ?? null,
       msTotal: Date.now() - t0,
+      note: sessionBelongsToSite ? undefined : "session_end_fail_soft_no_session_row",
     });
   } catch (err) {
     console.error(`[session:end][${requestId}] Unhandled error`, {

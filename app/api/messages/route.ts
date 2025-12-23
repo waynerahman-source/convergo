@@ -1,4 +1,4 @@
-// C:\Users\Usuario\Projects\convergo\app\api\messages\route.ts
+// app/api/messages/route.ts
 import { NextResponse } from "next/server";
 import { prisma } from "../../../lib/prisma";
 
@@ -40,15 +40,12 @@ function isAuthorRequest(searchParams: URLSearchParams): boolean {
 
   const provided = (searchParams.get("authorKey") ?? "").trim();
   const expected = (process.env.CONVERGO_AUTHOR_KEY ?? "").trim();
-
-  // If no key configured, author/all mode is disabled by default (safer).
   if (!expected) return false;
 
   return provided.length > 0 && provided === expected;
 }
 
 function clampSite(raw: string): string {
-  // prevent weirdly long/untrusted input
   const s = (raw ?? "default").toString().trim() || "default";
   return s.length > 80 ? s.slice(0, 80) : s;
 }
@@ -58,32 +55,25 @@ function normalizeRole(roleRaw: string): "user" | "assistant" {
   return r === "assistant" ? "assistant" : "user";
 }
 
+/* =========================
+   GET — FAIL-SOFT (MVP1)
+   ========================= */
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
   const site = clampSite(searchParams.get("site") ?? "default");
   const requestedSessionId = (searchParams.get("sessionId") ?? "").trim();
 
-  // Ensure conversation exists
   const convo = await prisma.conversation.upsert({
     where: { site },
     update: {},
     create: { site },
   });
 
-  // 1) If explicit sessionId provided: validate and return that session's messages (author or visitor)
+  // Explicit session requested: return msgs or empty (never error)
   if (requestedSessionId) {
-    const session = await prisma.session.findUnique({
-      where: { id: requestedSessionId },
-      select: { id: true, conversationId: true },
-    });
-
-    if (!session || session.conversationId !== convo.id) {
-      return json(false, { error: "Invalid sessionId for this site" }, 400);
-    }
-
     const messages: ApiMsg[] = await prisma.message.findMany({
-      where: { conversationId: convo.id, sessionId: session.id },
+      where: { conversationId: convo.id, sessionId: requestedSessionId },
       orderBy: { createdAt: "asc" },
       take: 200,
       select: { id: true, role: true, content: true, createdAt: true },
@@ -92,17 +82,13 @@ export async function GET(req: Request) {
     return json(true, {
       site,
       conversationId: convo.id,
-      sessionId: session.id,
-      messages: messages.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.createdAt,
-      })),
+      sessionId: requestedSessionId,
+      messages,
+      scope: messages.length ? "explicit" : "explicit-empty",
     });
   }
 
-  // 2) Author-only: allow "all history across sessions"
+  // Author-only: all history
   if (isAuthorRequest(searchParams)) {
     const messages: ApiMsg[] = await prisma.message.findMany({
       where: { conversationId: convo.id },
@@ -115,21 +101,16 @@ export async function GET(req: Request) {
       site,
       conversationId: convo.id,
       sessionId: null,
-      messages: messages.map((m) => ({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.createdAt,
-      })),
+      messages,
       scope: "all",
     });
   }
 
-  // 3) Default (visitor-safe): return ONLY the latest session messages (if any)
+  // Default: latest session if any
   const latest = await prisma.session.findFirst({
     where: { conversationId: convo.id },
     orderBy: { startedAt: "desc" },
-    select: { id: true, startedAt: true },
+    select: { id: true },
   });
 
   if (!latest) {
@@ -138,7 +119,7 @@ export async function GET(req: Request) {
       conversationId: convo.id,
       sessionId: null,
       messages: [],
-      scope: "latest",
+      scope: "latest-empty",
     });
   }
 
@@ -153,20 +134,19 @@ export async function GET(req: Request) {
     site,
     conversationId: convo.id,
     sessionId: latest.id,
-    messages: messages.map((m) => ({
-      id: m.id,
-      role: m.role,
-      content: m.content,
-      createdAt: m.createdAt,
-    })),
+    messages,
     scope: "latest",
   });
 }
 
+/* =========================
+   POST — MVP1 SAFE
+   - if sessionId provided and session row missing,
+     we CREATE it (linked to conversation) instead of rejecting.
+   ========================= */
 export async function POST(req: Request) {
   const requestId = makeRequestId();
 
-  // Limits (server-enforced). Keep these simple + configurable.
   const MAX_MESSAGE_CHARS = Number(process.env.MAX_MESSAGE_CHARS ?? "4000");
   const MAX_MESSAGES_PER_SESSION = Number(process.env.MAX_MESSAGES_PER_SESSION ?? "80");
 
@@ -186,34 +166,44 @@ export async function POST(req: Request) {
     });
   }
 
-  if (Number.isFinite(MAX_MESSAGE_CHARS) && MAX_MESSAGE_CHARS > 0 && content.length > MAX_MESSAGE_CHARS) {
+  if (MAX_MESSAGE_CHARS > 0 && content.length > MAX_MESSAGE_CHARS) {
     return jsonError(413, {
       requestId,
       error: "MESSAGE_TOO_LONG",
-      message: `Message too long (${content.length} chars). Max is ${MAX_MESSAGE_CHARS}. Please shorten or split your text. See /limits.`,
+      message: `Message too long (${content.length} chars). Max is ${MAX_MESSAGE_CHARS}.`,
       site,
-      maxChars: MAX_MESSAGE_CHARS,
-      actualChars: content.length,
     });
   }
 
-  // Ensure conversation exists
   const convo = await prisma.conversation.upsert({
     where: { site },
     update: {},
     create: { site },
   });
 
-  // If sessionId provided, verify it belongs to this conversation
-  let sessionIdToUse: string | undefined = undefined;
+  let sessionIdToUse: string | undefined;
 
   if (sessionId) {
-    const session = await prisma.session.findUnique({
+    // MVP1 behaviour: if session row doesn't exist yet, create it.
+    // This fixes "Draft finds no messages".
+    let session = await prisma.session.findUnique({
       where: { id: sessionId },
       select: { id: true, conversationId: true, endedAt: true },
     });
 
-    if (!session || session.conversationId !== convo.id) {
+    if (!session) {
+      session = await prisma.session.create({
+        data: {
+          id: sessionId,
+          conversationId: convo.id,
+          startedAt: new Date(),
+          endedAt: null,
+        },
+        select: { id: true, conversationId: true, endedAt: true },
+      });
+    }
+
+    if (session.conversationId !== convo.id) {
       return jsonError(400, {
         requestId,
         error: "INVALID_SESSION",
@@ -223,7 +213,6 @@ export async function POST(req: Request) {
       });
     }
 
-    // MVP rule: don’t allow writing into a closed session
     if (session.endedAt) {
       return jsonError(400, {
         requestId,
@@ -234,8 +223,7 @@ export async function POST(req: Request) {
       });
     }
 
-    // Session message count guardrail (prevents runaway DB growth and abuse)
-    if (Number.isFinite(MAX_MESSAGES_PER_SESSION) && MAX_MESSAGES_PER_SESSION > 0) {
+    if (MAX_MESSAGES_PER_SESSION > 0) {
       const count = await prisma.message.count({
         where: { conversationId: convo.id, sessionId: session.id },
       });
@@ -244,11 +232,9 @@ export async function POST(req: Request) {
         return jsonError(429, {
           requestId,
           error: "SESSION_MESSAGE_LIMIT_REACHED",
-          message: `This session has reached the message limit (${MAX_MESSAGES_PER_SESSION}). Please end the session and start a new one. See /limits.`,
+          message: `Session limit reached (${MAX_MESSAGES_PER_SESSION}).`,
           site,
           sessionId,
-          maxMessagesPerSession: MAX_MESSAGES_PER_SESSION,
-          currentCount: count,
         });
       }
     }
@@ -272,3 +258,4 @@ export async function POST(req: Request) {
     message,
   });
 }
+

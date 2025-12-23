@@ -1,4 +1,4 @@
-// C:\Users\Usuario\Projects\convergo\app\api\chat\route.ts
+// app/api/chat/route.ts
 import { NextResponse } from "next/server";
 
 export const dynamic = "force-dynamic";
@@ -90,7 +90,8 @@ export async function POST(req: Request) {
 
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
-      const reply = "Message saved. Set OPENAI_API_KEY to enable AI replies.";
+      const reply =
+        "Message saved. Set OPENAI_API_KEY to enable AI replies.";
       await saveMessage(origin, site, "assistant", reply, sessionId || undefined);
       return NextResponse.json({ reply });
     }
@@ -110,12 +111,30 @@ export async function POST(req: Request) {
       // ignore
     }
 
+    // --- NEW ROLE: ConVergo editorial companion (Mdc = reflective magazine) ---
+    const systemPrompt = [
+      "You are ConVergo: an editorial AI companion for authors.",
+      "",
+      "Context:",
+      "- The site (Mdc) is a reflective MAGAZINE of inquiry, not a personal diary.",
+      "- Topics can range widely: life, tech, culture, ideas, spirituality, creative work, etc.",
+      "- Use broad 'continent' categories (big themes), not narrow 'street' micro-topics.",
+      "",
+      "Your job in this chat:",
+      "1) Help the author think clearly, research quickly, and draft publishable articles.",
+      "2) Ask at most ONE clarifying question when needed (otherwise proceed).",
+      "3) Keep responses concise and practical by default.",
+      "4) When the author asks for an article: propose a title + outline, then draft.",
+      "5) Do NOT call it a diary, do NOT assume therapy language unless asked.",
+      "6) Optional: if the author mentions affiliate intent, suggest 5-7 non-spammy items and a disclosure line.",
+      "",
+      "Style:",
+      "- Warm, grounded, no fluff. Plain ASCII punctuation.",
+      "- Prefer structured output: bullets, headings, checklists.",
+    ].join("\n");
+
     const messages = [
-      {
-        role: "system" as const,
-        content:
-          "You are an AI diary companion. Be warm, concise, and helpful. Keep responses short unless asked for detail. Use plain ASCII punctuation.",
-      },
+      { role: "system" as const, content: systemPrompt },
       ...((historyData?.messages ?? []) as any[]).map((m) => ({
         role: m.role,
         content: m.content,
